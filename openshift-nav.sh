@@ -1,8 +1,8 @@
 #!/bin/sh
 # ============================================================
 #  openshift-nav.sh — Navegador remoto ligero en OpenShift Sandbox
-#  v2.5: + fija la carpeta de descargas a /headless/Downloads
-#        (Firefox en español usaba "Descargas" y confundía la búsqueda)
+#  v2.6: + los ÍCONOS del escritorio (menú y barra de IceWM)
+#        ahora lanzan el Firefox NUEVO — ya no el viejo de 2022
 #  1 proceso real · techo RAM 3Gi · auto-revive · 1024x600x16
 #  Idempotente. Ejecutar en la TERMINAL WEB de OpenShift (icono >_)
 #
@@ -59,8 +59,8 @@ POD=$(oc get pods --no-headers 2>/dev/null | awk -v app="$APP" '$1 ~ ("^" app "-
 [ -n "$POD" ] || { err "No encontré pod Running de $APP. Pégame la salida de: oc get pods"; exit 1; }
 log "Pod activo: $POD"
 
-# ---------- 6. Dentro del pod: matar viejo, instalar nuevo, VERIFICAR, VIGILAR ----------
-log "Instalando Firefox actual + perfil ultraligero (1 proceso real) + auto-revive..."
+# ---------- 6. Dentro del pod: matar viejo, instalar nuevo, VERIFICAR, VIGILAR, ÍCONOS ----------
+log "Instalando Firefox actual + perfil ultraligero + auto-revive + iconos nuevos..."
 oc exec -i "$POD" -- env FF_RES="$RES" FF_URL="$FF_URL" sh -s <<'INNER'
 set -e
 cd "$HOME"
@@ -118,12 +118,23 @@ else
   echo "   [ERROR] el Firefox nuevo no esta corriendo. Salida cruda del intento:"
   DISPLAY=:1 "$HOME/firefox/firefox" --width "$W" --height "$H" --profile "$HOME/ff-notion" "$FF_URL" 2>&1 | head -15 || true
 fi
-echo "==> procesos de navegador activos ahora (deberian ser POCOS):"
-ps aux | grep -iE 'firefox|chrom' | grep -v grep || echo "   (ninguno)"
 
 echo "==> activando auto-revive (vigilante cada 15 s)..."
 nohup sh -c 'while true; do if ! pgrep -f "firefo[x]/firefox" >/dev/null 2>&1; then W=$(echo "$FF_RES" | cut -dx -f1); H=$(echo "$FF_RES" | cut -dx -f2); DISPLAY=:1 "$HOME/firefox/firefox" --width "$W" --height "$H" --profile "$HOME/ff-notion" "$FF_URL" >/dev/null 2>&1 & fi; sleep 15; done' >/dev/null 2>&1 &
-echo "   [OK] vigilante activo: si Firefox cae, se relanza solo"
+echo "   [OK] vigilante activo: si cierras Firefox, se reabre SOLO en ~15 s"
+
+echo "==> apuntando los iconos del escritorio al Firefox NUEVO..."
+mkdir -p "$HOME/.icewm"
+cat > "$HOME/.icewm/menu" <<MENU
+prog "Firefox NUEVO (Notion)" firefox $HOME/firefox/firefox --width $W --height $H --profile $HOME/ff-notion $FF_URL
+prog "Terminal" utilities-terminal xterm
+MENU
+cat > "$HOME/.icewm/toolbar" <<TOOLBAR
+prog "Firefox NUEVO" firefox $HOME/firefox/firefox --width $W --height $H --profile $HOME/ff-notion $FF_URL
+prog "Terminal" utilities-terminal xterm
+TOOLBAR
+pkill -HUP icewm 2>/dev/null || true
+echo "   [OK] menu y barra de IceWM ahora abren el Firefox nuevo (nunca el viejo)"
 INNER
 
 # ---------- 7. Resultado ----------
@@ -131,31 +142,28 @@ ROUTE=$(oc get route "$APP" -o jsonpath='{.spec.host}')
 cat <<FIN
 
 ============================================================
- ✅ $APP OPTIMIZADO Y LISTO (v2.5)
+ ✅ $APP OPTIMIZADO Y LISTO (v2.6)
 ------------------------------------------------------------
  URL:        https://$ROUTE/?password=$VNC_PASSWORD
  Contraseña: $VNC_PASSWORD
  Pagina:     Notion — ventana unica $RES (Firefox ACTUAL,
              1 SOLO proceso de contenido, login normal)
 ------------------------------------------------------------
- AJUSTES DE CONSUMO APLICADOS
+ AJUSTES APLICADOS
  · Escritorio IceWM · Pantalla virtual $RES x $DEPTH bits
- · Firefox: 1 proceso real (Fission apagado, sin pre-lanzados),
-   sin cache RAM, sin historial en memoria, sin autoplay
+ · Firefox: 1 proceso real, sin cache RAM, sin autoplay
  · Limites: $REQ_MEM min / $LIM_MEM max RAM
- · Auto-revive: si Firefox cae, se relanza solo en ~15 s
- · Descargas fijadas en /headless/Downloads (predecibles)
+ · Auto-revive: si cierras Firefox, se REABRE SOLO en ~15 s
+ · Los ICONOS del escritorio ahora abren el Firefox NUEVO
+ · Descargas fijadas en /headless/Downloads
 ------------------------------------------------------------
- COMO ENTRAR A NOTION:
- · La ventana abre directo en Notion.
- · Login con email+codigo: todo en la misma ventana.
- · El popup de Google ya funciona (no es kiosko).
-------------------------------------------------------------
- REGLA VISUAL:
- · La ventana que abre SOLA con Notion = Firefox NUEVO ✓
- · Iconos del escritorio / menus viejos = el de 2023 ✗
+ SI CIERRAS FIREFOX:
+ · No toques nada: el vigilante lo reabre solo en ~15 s.
+ · O usa el menu/botón "Firefox NUEVO" del escritorio.
+ · El icono viejo ya no engaña: tambien apunta al nuevo.
 ------------------------------------------------------------
  SI EL POD SE REINICIA: vuelve a ejecutar  sh openshift-nav.sh
- Verificar consumo en vivo:  oc adm top pods
+ (ojo: se borran descargas y el login — sácalos antes con
+  publicar.sh si tienes archivos pendientes)
 ============================================================
 FIN
