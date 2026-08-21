@@ -1,13 +1,14 @@
 #!/bin/sh
 # ============================================================
 #  modo.sh — interruptor de nav1: PANTALLA (VNC) <-> LIGERO (texto)
-#  v1.2 EXPERIMENTAL
-#    · la respuesta se muestra MIENTRAS se genera (texto parcial
-#      en vivo en la burbuja, no solo al final)
-#    · boton 🪞 Espejo: muestra el texto actual de la pagina de
-#      Notion actualizandose cada 4 s (imitacion en vivo, solo texto)
-#  v1.1 · el destino se valida: solo URLs de Notion
-#       · nuevo /debug?clave=... : que esta viendo el headless
+#  v1.3 EXPERIMENTAL
+#    · el headless PRECARGA Notion apenas arranca (antes la pagina
+#      quedaba en blanco hasta la primera pregunta y el espejo no
+#      mostraba nada)
+#    · el destino guardado se AUTOVALIDA: si no es de Notion se
+#      resetea solo (sanaea el destino malo de pruebas anteriores)
+#  v1.2 · respuesta en vivo (texto parcial) + boton Espejo 🪞
+#  v1.1 · destino validado (solo URLs de Notion) + /debug
 #  v1.0 · Firefox headless + Marionette + mini chat web de texto
 #
 #  Uso (terminal web de OpenShift, icono >_):
@@ -77,6 +78,7 @@ contador = [0]
 cont_lock = threading.Lock()
 m_lock = threading.Lock()   # Marionette NO es hilo-seguro: 1 pregunta a la vez
 vivo = {"texto": "", "job": None}   # texto parcial de la respuesta en curso
+_calentando = [False]
 
 # ---------------- Marionette minimo (solo stdlib) ----------------
 class Marionette:
@@ -151,11 +153,34 @@ def js(script):
     return valor(conectar().cmd("WebDriver:ExecuteScript", {"script": script, "args": []}))
 
 def destino_actual():
+    # autovalida: si lo guardado no es de Notion, vuelve al default
     if os.path.exists(DESTINO_FILE):
         d = open(DESTINO_FILE).read().strip()
-        if d:
+        if d and "notion" in d.lower():
             return d
     return DESTINO_DEFAULT
+
+def lanzar_calentar():
+    # precarga Notion en el headless sin bloquear al servidor
+    if _calentando[0]:
+        return
+    _calentando[0] = True
+    def run():
+        try:
+            with m_lock:
+                destino = destino_actual()
+                actual = ""
+                try:
+                    actual = js("location.href") or ""
+                except Exception:
+                    actual = ""
+                if destino.split("?")[0] not in actual:
+                    js("location.href = " + json.dumps(destino))
+        except Exception:
+            pass
+        finally:
+            _calentando[0] = False
+    threading.Thread(target=run, daemon=True).start()
 
 JS_COMPOSER = """
 (() => {
@@ -302,12 +327,16 @@ class H(BaseHTTPRequestHandler):
             return
         if path == "/espejo":
             if m_lock.locked():
-                self._json({"ocupado": True, "texto": vivo.get("texto", "")})
+                self._json({"ocupado": True, "texto": vivo.get("texto", ""), "cargando": not vivo.get("texto")})
                 return
             with m_lock:
                 try:
                     info = leer()
                     txt = info.get("texto") or ""
+                    if not txt.strip():
+                        lanzar_calentar()
+                        self._json({"ocupado": False, "texto": "", "cargando": True})
+                        return
                     self._json({"ocupado": False, "texto": txt[-4000:], "escribiendo": info.get("escribiendo", False)})
                 except Exception as e:
                     self._json({"ocupado": False, "texto": "", "error": str(e)})
@@ -358,6 +387,7 @@ class H(BaseHTTPRequestHandler):
         self._json({"error": "ruta desconocida"}, 404)
 
 if __name__ == "__main__":
+    lanzar_calentar()   # precarga Notion apenas arranca el servidor
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
 PYEOF
   oc exec -i "$POD" -- sh -c 'cat > /headless/data/chat/chat.html' <<'HTMLEOF'
@@ -446,7 +476,7 @@ $("bespejo").onclick = function() {
 function tickEspejo() {
   if (!espejoOn) return;
   api("/espejo").then(function(d) {
-    $("espejo").textContent = d.texto || (d.error ? ("⚠ " + d.error) : "(la pagina aun no muestra texto)");
+    $("espejo").textContent = d.texto || (d.error ? ("⚠ " + d.error) : "cargando Notion en el navegador oculto... (la primera vez tarda 1-2 min)");
   }).catch(function(){});
   setTimeout(tickEspejo, 4000);
 }
@@ -547,15 +577,18 @@ INNER
   cat <<FIN
 
 ============================================================
- ✅ MODO LIGERO ACTIVO (v1.2 experimental)
+ ✅ MODO LIGERO ACTIVO (v1.3 experimental)
 ------------------------------------------------------------
  Abre en tu PC/telefono:  https://$RUTA/
  Clave (te la pide una vez, boton ⚙): $CLAVE
 ------------------------------------------------------------
- · NUEVO: la respuesta se va viendo MIENTRAS se genera.
- · NUEVO: boton 🪞 = espejo de texto de la pagina (cada 4 s).
- · El DESTINO (boton ⚙) debe ser una pagina de NOTION,
-   ej: https://www.notion.so/chat  —  NUNCA la URL del VNC.
+ · NUEVO: el headless PRECARGA Notion al arrancar (el espejo
+   tarda 1-2 min la primera vez en llenarse — es normal).
+ · La respuesta se va viendo MIENTRAS se genera.
+ · Boton 🪞 = espejo de texto de la pagina (cada 4 s).
+ · El DESTINO (boton ⚙) debe ser una pagina de NOTION;
+   si quedo uno malo guardado, se resetea solo a
+   https://www.notion.so/chat
  · Diagnostico: https://$RUTA/debug?clave=$CLAVE
 ------------------------------------------------------------
  Si algo falla: vuelve a la normalidad con
