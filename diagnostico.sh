@@ -20,7 +20,11 @@ echo
 echo "== RUTA =="
 oc get route "$APP" 2>&1 || echo "(sin ruta)"
 
-# Detección robusta: por prefijo de nombre (las etiquetas varían según cómo se creó)
+echo
+echo "== ALMACENAMIENTO PERSISTENTE =="
+oc get pvc 2>&1 || echo "(sin volumenes)"
+
+# Detección robusta: por prefijo de nombre
 POD=$(oc get pods --no-headers 2>/dev/null | awk -v app="$APP" '$1 ~ ("^" app "-") && $3=="Running" {print $1; exit}')
 if [ -z "$POD" ]; then
   echo
@@ -34,16 +38,22 @@ oc exec -i "$POD" -- sh -s <<'INNER'
 echo
 echo "== NAVEGADORES INSTALADOS =="
 echo "-- en la imagen (viejos):"
-ls /usr/bin 2>/dev/null | grep -iE 'firefox|chrom' || echo "   ninguno en /usr/bin"
 for b in /usr/bin/firefox /usr/lib64/firefox/firefox /usr/bin/chromium /usr/bin/chromium-browser; do
   [ -e "$b" ] && echo "   $b -> $($b --version 2>/dev/null || echo '?')"
 done
 echo "-- portable (nuevo):"
-if [ -x "$HOME/firefox/firefox" ]; then
-  echo "   $HOME/firefox/firefox -> $($HOME/firefox/firefox --version 2>/dev/null)"
+if [ -x "$HOME/data/firefox/firefox" ]; then
+  echo "   $HOME/data/firefox/firefox -> $($HOME/data/firefox/firefox --version 2>/dev/null) [PERSISTENTE]"
+elif [ -x "$HOME/firefox/firefox" ]; then
+  echo "   $HOME/firefox/firefox -> $($HOME/firefox/firefox --version 2>/dev/null) [efimero]"
 else
   echo "   NO INSTALADO"
 fi
+
+echo
+echo "== VOLUMEN PERSISTENTE (contenido) =="
+ls -lh "$HOME/data" 2>/dev/null || echo "   (sin volumen montado)"
+du -sh "$HOME/data" 2>/dev/null || true
 
 echo
 echo "== PROCESOS DE NAVEGADOR CORRIENDO =="
