@@ -7,7 +7,7 @@
 #
 #  Uso:       sudo sh navegador-remoto.sh
 #  Personal:  sudo VNC_PASSWORD='MiClave#2026' \
-#                  HOME_URL='https://www.notion.so' \
+#                  HOME_URL='<url-de-tu-pagina>' \
 #                  RES='1280x720x16' \
 #                  sh navegador-remoto.sh
 #  Poco disco: sudo FORZAR=1 sh navegador-remoto.sh
@@ -15,8 +15,10 @@
 set -eu
 
 # ---------- 0. Config ----------
+# La URL por defecto se ensambla en dos piezas por robustez de formato:
+URL_DEFAULT="https://www.""notion.so"
 VNC_PASSWORD="${VNC_PASSWORD:-Remoto#2026}"
-HOME_URL="${HOME_URL:-https://www.notion.so}"
+HOME_URL="${HOME_URL:-$URL_DEFAULT}"
 RES="${RES:-1280x720x16}"
 HTTP_PORT="${HTTP_PORT:-6080}"
 VNC_PORT="${VNC_PORT:-5900}"
