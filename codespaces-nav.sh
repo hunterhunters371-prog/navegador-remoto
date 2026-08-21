@@ -1,5 +1,6 @@
 #!/bin/sh
 # codespaces-nav.sh — Firefox remoto (interfaz web) en GitHub Codespaces
+# v1.2: corrige la URL impresa (se colaban unas llaves dobles en el texto)
 # v1.1: + --shm-size=512m (evita que las pestañas de Firefox se caigan:
 #         docker da solo 64 MB de /dev/shm por defecto)
 # Uso: curl -fsSL https://raw.githubusercontent.com/hunterhunters371-prog/navegador-remoto/main/codespaces-nav.sh -o cs.sh && sh cs.sh
@@ -44,7 +45,7 @@ done
 
 URL="http://localhost:$PORT"
 if [ -n "${CODESPACE_NAME:-}" ] && [ -n "${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}" ]; then
-  URL="{{https://${CODESPACE_NAME}}}-${PORT}.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}/"
+  URL="https://${CODESPACE_NAME}-${PORT}.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}/"
 fi
 echo
 echo "======================================================="
