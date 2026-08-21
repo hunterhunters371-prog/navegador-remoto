@@ -1,18 +1,20 @@
 #!/bin/sh
 # ============================================================
 #  modo.sh — interruptor de nav1: PANTALLA (VNC) <-> LIGERO (texto)
-#  v1.5 EXPERIMENTAL
-#    · cambiar el destino (⚙) ahora NAVEGA YA a la nueva pagina
-#      (antes no pasaba nada hasta la siguiente pregunta)
-#    · estado de pagina explicito (cargando/por-verificar/lista):
-#      el espejo responde "cargando" SIN tocar el headless mientras
-#      Notion termina de cargar (adios al ocupado permanente)
-#    · /salud y /debug reportan el estado de la pagina
-#  v1.4 · /salud con diagnostico sin bloqueo + /debug nunca se cuelga
-#  v1.3 · precarga Notion al arrancar + autovalida destino
-#  v1.2 · respuesta en vivo (texto parcial) + boton Espejo 🪞
-#  v1.1 · destino validado (solo URLs de Notion) + /debug
-#  v1.0 · Firefox headless + Marionette + mini chat web de texto
+#  v1.6 — ARREGLO DE RAIZ
+#    · BUG CAUSA RAIZ: en WebDriver/Marionette el script se ejecuta
+#      como CUERPO DE FUNCION -> sin "return" todo devolvia undefined.
+#      Por eso el espejo salia vacio, el composer nunca se detectaba
+#      y el candado quedaba ocupado reintentando. Ahora TODOS los
+#      scripts llevan return.
+#    · navegacion con el comando nativo WebDriver:Navigate (antes se
+#      asignaba location.href dentro de un script, sin esperar carga)
+#    · lector en 2do plano cachea el texto: el espejo ya no compite
+#      por el candado (lee del cache, nunca bloquea)
+#    · sesion Marionette se auto-reconecta si un comando falla
+#    · nuevo /prueba?clave=... : autodiagnostico en 1 golpe
+#    · opcional SIGILO=1 sh modo.sh ligero  ->  oculta
+#      navigator.webdriver (solo si sospechamos deteccion)
 #
 #  Uso (terminal web de OpenShift, icono >_):
 #    sh modo.sh ligero     → activa/actualiza el chat de texto
@@ -23,6 +25,7 @@ set -eu
 
 APP="${APP:-nav1}"
 RES="${RES:-1024x600}"
+SIGILO="${SIGILO:-0}"
 CHAT_PORT=6902
 FF_URL="https://www.""notion.so"
 
@@ -59,13 +62,12 @@ spec:
 SVC
   oc create route edge "$APP-chat" --service "$APP-chat" --port $CHAT_PORT --insecure-policy Redirect 2>/dev/null || true
 
-  log "Instalando el puente en el volumen persistente (server.py + chat.html)..."
+  log "Instalando el puente v1.6 en el volumen persistente..."
   oc exec -i "$POD" -- sh -c 'mkdir -p /headless/data/chat'
   oc exec -i "$POD" -- sh -c 'cat > /headless/data/chat/server.py' <<'PYEOF'
 #!/usr/bin/env python3
-# server.py — puente texto <-> Notion AI (Firefox headless + Marionette)
-# Vive en /headless/data/chat/ (volumen persistente). Lo instala modo.sh.
-# Solo usa la libreria estandar de Python.
+# server.py v1.6 - puente de texto <-> Notion AI (Firefox headless + Marionette)
+# Solo stdlib. Lo instala modo.sh en /headless/data/chat/
 import json, os, socket, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -79,16 +81,17 @@ PORT = int(os.environ.get("CHAT_PORT", "6902"))
 jobs = {}
 contador = [0]
 cont_lock = threading.Lock()
-m_lock = threading.Lock()   # Marionette NO es hilo-seguro: 1 pregunta a la vez
-vivo = {"texto": "", "job": None}   # texto parcial de la respuesta en curso
-pagina = {"estado": "iniciando", "desde": 0}   # cargando -> por-verificar -> lista
-_calentando = [False]
+m_lock = threading.Lock()          # Marionette no es hilo-seguro
+vivo = {"texto": "", "job": None}  # respuesta parcial en curso
+cache = {"texto": "", "cuando": 0, "escribiendo": False}
+pagina = {"estado": "iniciando", "desde": time.time(), "detalle": ""}
+_navegando = [False]
 
 # ---------------- Marionette minimo (solo stdlib) ----------------
 class Marionette:
     def __init__(self, port=2828):
         self.s = socket.create_connection(("127.0.0.1", port), timeout=30)
-        self.s.settimeout(90)
+        self.s.settimeout(180)
         self.buf = b""
         self.hello = self._recv()
         self.mid = 0
@@ -134,7 +137,8 @@ def conectar():
     if _m is not None:
         return _m
     ultimo = None
-    for _ in range(40):
+    for _ in range(10):
+        c = None
         try:
             c = Marionette()
             try:
@@ -145,19 +149,33 @@ def conectar():
             return _m
         except Exception as e:
             ultimo = e
-            try:
+            if c is not None:
                 c.close()
-            except Exception:
-                pass
             _m = None
             time.sleep(2)
     raise RuntimeError("no pude conectar con Firefox headless: %s" % ultimo)
 
+def soltar():
+    global _m
+    if _m is not None:
+        _m.close()
+        _m = None
+
+def cmd(nombre, params=None):
+    try:
+        return valor(conectar().cmd(nombre, params or {}))
+    except Exception:
+        soltar()   # sesion posiblemente desincronizada: reconectar luego
+        raise
+
+# CLAVE DEL ARREGLO v1.6: el script va como CUERPO de funcion -> necesita return
 def js(script):
-    return valor(conectar().cmd("WebDriver:ExecuteScript", {"script": script, "args": []}))
+    return cmd("WebDriver:ExecuteScript", {"script": script, "args": []})
+
+def navegar(url):
+    return cmd("WebDriver:Navigate", {"url": url})
 
 def marionette_vivo():
-    # sondea el saludo de Marionette SIN sesion (solo si no hay cliente activo)
     try:
         s = socket.create_connection(("127.0.0.1", 2828), timeout=5)
         s.settimeout(5)
@@ -168,105 +186,116 @@ def marionette_vivo():
         return False
 
 def destino_actual():
-    # autovalida: si lo guardado no es de Notion, vuelve al default
     if os.path.exists(DESTINO_FILE):
         d = open(DESTINO_FILE).read().strip()
         if d and "notion" in d.lower():
             return d
     return DESTINO_DEFAULT
 
-def lanzar_calentar(forzar=False):
-    # navega al destino en segundo plano, sin bloquear al servidor
-    if _calentando[0]:
+JS_URL = "return location.href"
+JS_TITULO = "return document.title"
+JS_COMPOSER = """
+const eds = [...document.querySelectorAll('div[contenteditable="true"]')]
+  .filter(e => e.offsetParent !== null);
+return eds.length;
+"""
+JS_LOGIN = """
+const t = (document.body && document.body.innerText) || "";
+return /log in|sign in|iniciar sesi|continuar con/i.test(t);
+"""
+JS_LEER = """
+const main = document.querySelector("main") || document.body;
+const stop = !!document.querySelector(
+  '[aria-label*="Stop"], [aria-label*="stop"], [aria-label*="Detener"], [aria-label*="detener"]');
+return JSON.stringify({texto: (main.innerText || ""), escribiendo: stop});
+"""
+JS_ENVIAR = """
+const eds = [...document.querySelectorAll('div[contenteditable="true"]')]
+  .filter(e => e.offsetParent !== null);
+if (!eds.length) return "sin-composer";
+const ed = eds[eds.length - 1];
+ed.focus();
+document.execCommand("selectAll", false, null);
+document.execCommand("insertText", false, %s);
+ed.dispatchEvent(new KeyboardEvent("keydown",
+  {key:"Enter", code:"Enter", keyCode:13, which:13, bubbles:true}));
+return "enviado";
+"""
+
+def leer():
+    try:
+        d = json.loads(js(JS_LEER) or "{}")
+        return {"texto": d.get("texto", "") or "", "escribiendo": bool(d.get("escribiendo"))}
+    except Exception as e:
+        pagina["detalle"] = "error leyendo: %s" % e
+        return {"texto": "", "escribiendo": False}
+
+def esperar_composer(segundos=180):
+    t0 = time.time()
+    while time.time() - t0 < segundos:
+        try:
+            if js(JS_COMPOSER):
+                pagina["estado"] = "lista"
+                return True
+        except Exception as e:
+            pagina["detalle"] = str(e)
+        time.sleep(3)
+    return False
+
+def ir_al_destino(forzar=False):
+    if _navegando[0]:
         return
-    _calentando[0] = True
-    pagina["estado"] = "cargando"
-    pagina["desde"] = time.time()
+    _navegando[0] = True
     def run():
         try:
             with m_lock:
+                pagina["estado"] = "navegando"
+                pagina["desde"] = time.time()
                 destino = destino_actual()
                 actual = ""
                 try:
-                    actual = js("location.href") or ""
+                    actual = js(JS_URL) or ""
                 except Exception:
                     actual = ""
                 if forzar or destino.split("?")[0] not in actual:
-                    js("location.href = " + json.dumps(destino))
-                    time.sleep(20)   # deja respirar la carga inicial de la SPA
-        except Exception:
-            pass
+                    navegar(destino)
+                pagina["estado"] = "cargando"
+                if not esperar_composer(180):
+                    try:
+                        pagina["estado"] = "login" if js(JS_LOGIN) else "sin-composer"
+                    except Exception:
+                        pagina["estado"] = "sin-composer"
+        except Exception as e:
+            pagina["estado"] = "error"
+            pagina["detalle"] = str(e)
         finally:
-            pagina["estado"] = "por-verificar"
-            _calentando[0] = False
+            _navegando[0] = False
     threading.Thread(target=run, daemon=True).start()
-
-JS_COMPOSER = """
-(() => {
-  const eds = [...document.querySelectorAll('div[contenteditable="true"]')]
-    .filter(e => e.offsetParent !== null);
-  return eds.length > 0;
-})()
-"""
 
 def asegurar_pagina():
     destino = destino_actual()
     actual = ""
     try:
-        actual = js("location.href") or ""
+        actual = js(JS_URL) or ""
     except Exception:
         actual = ""
     if destino.split("?")[0] not in actual:
         pagina["estado"] = "cargando"
         pagina["desde"] = time.time()
-        js("location.href = " + json.dumps(destino))
-        t0 = time.time()
-        while time.time() - t0 < 120:
-            time.sleep(3)
-            try:
-                if js(JS_COMPOSER):
-                    pagina["estado"] = "lista"
-                    return
-            except Exception:
-                pass
-        raise RuntimeError("la pagina no mostro el cuadro de texto a tiempo (login vencido o URL destino incorrecta)")
-    pagina["estado"] = "lista"
-
-JS_ENVIAR = """
-(() => {
-  const eds = [...document.querySelectorAll('div[contenteditable="true"]')]
-    .filter(e => e.offsetParent !== null);
-  if (!eds.length) return "sin-composer";
-  const ed = eds[eds.length - 1];
-  ed.focus();
-  document.execCommand("selectAll", false, null);
-  document.execCommand("insertText", false, %s);
-  ed.dispatchEvent(new KeyboardEvent("keydown",
-    {key:"Enter", code:"Enter", keyCode:13, which:13, bubbles:true}));
-  return "enviado";
-})()
-"""
-
-JS_LEER = """
-(() => {
-  const main = document.querySelector("main") || document.body;
-  const stop = !!document.querySelector(
-    '[aria-label*="Stop"], [aria-label*="stop"], [aria-label*="Detener"], [aria-label*="detener"]');
-  return JSON.stringify({texto: (main.innerText || ""), escribiendo: stop});
-})()
-"""
-
-def leer():
-    try:
-        return json.loads(js(JS_LEER) or "{}")
-    except Exception:
-        return {"texto": "", "escribiendo": False}
+        navegar(destino)
+    if js(JS_COMPOSER):
+        pagina["estado"] = "lista"
+        return
+    if esperar_composer(180):
+        return
+    if js(JS_LOGIN):
+        pagina["estado"] = "login"
+        raise RuntimeError("Notion pide iniciar sesion en el navegador oculto: corre 'sh m.sh pantalla', entra con email+codigo y vuelve con 'sh m.sh ligero'")
+    pagina["estado"] = "sin-composer"
+    raise RuntimeError("no aparecio el cuadro de texto: el destino puede no ser un chat de Notion AI, o la pagina cargo demasiado lento")
 
 def extraer(actual, base, prompt):
-    if base and actual.startswith(base):
-        nuevo = actual[len(base):]
-    else:
-        nuevo = actual
+    nuevo = actual[len(base):] if (base and actual.startswith(base)) else actual
     i = nuevo.rfind(prompt[:60])
     if i >= 0:
         return nuevo[i + len(prompt):].strip()
@@ -281,7 +310,7 @@ def trabajar(job_id, texto):
             base = leer()["texto"]
             r = js(JS_ENVIAR % json.dumps(texto))
             if r != "enviado":
-                raise RuntimeError("no encontre el cuadro de texto de Notion AI")
+                raise RuntimeError("no encontre el cuadro de texto de Notion AI (%s)" % r)
             anterior = ""
             estable = 0
             t0 = time.time()
@@ -290,6 +319,8 @@ def trabajar(job_id, texto):
                 info = leer()
                 cand = extraer(info["texto"], base, texto)
                 vivo["texto"] = cand
+                cache["texto"] = info["texto"][-4000:]
+                cache["cuando"] = time.time()
                 if info["escribiendo"]:
                     anterior = cand
                     estable = 0
@@ -305,6 +336,25 @@ def trabajar(job_id, texto):
             jobs[job_id] = {"listo": True, "texto": anterior, "error": "se acabo el tiempo; esto es lo ultimo visible"}
         except Exception as e:
             jobs[job_id] = {"listo": True, "texto": "", "error": str(e)}
+
+def lector():
+    # lee la pagina en 2do plano y cachea: el espejo nunca bloquea
+    while True:
+        time.sleep(5)
+        if not m_lock.acquire(blocking=False):
+            continue
+        try:
+            info = leer()
+            if info["texto"].strip():
+                cache["texto"] = info["texto"][-4000:]
+                cache["cuando"] = time.time()
+                cache["escribiendo"] = info["escribiendo"]
+                if pagina["estado"] in ("iniciando", "cargando", "por-verificar"):
+                    pagina["estado"] = "lista"
+        except Exception:
+            pass
+        finally:
+            m_lock.release()
 
 HTML = os.path.join(BASE, "chat.html")
 
@@ -333,9 +383,11 @@ class H(BaseHTTPRequestHandler):
                 m = "ocupado (trabajando)"
             else:
                 m = "escuchando" if marionette_vivo() else "NO responde"
-            self._json({"ok": True, "modo": "ligero", "firefox_headless": ff,
+            self._json({"ok": True, "version": "1.6", "firefox_headless": ff,
                         "marionette": m, "destino": destino_actual(),
-                        "pagina": pagina["estado"]})
+                        "pagina": pagina["estado"], "detalle": pagina["detalle"],
+                        "texto_en_cache": len(cache["texto"]),
+                        "cache_hace_seg": int(time.time() - cache["cuando"]) if cache["cuando"] else None})
             return
         if path == "/" or path == "/chat.html":
             data = open(HTML, "rb").read()
@@ -358,48 +410,55 @@ class H(BaseHTTPRequestHandler):
             self._json(job)
             return
         if path == "/espejo":
-            if pagina["estado"] == "cargando":
-                self._json({"ocupado": False, "texto": "", "cargando": True})
+            if vivo.get("texto") and m_lock.locked():
+                self._json({"texto": vivo["texto"], "en_curso": True})
                 return
-            if m_lock.locked():
-                self._json({"ocupado": True, "texto": vivo.get("texto", ""), "cargando": not vivo.get("texto")})
+            self._json({"texto": cache["texto"], "pagina": pagina["estado"],
+                        "hace_seg": int(time.time() - cache["cuando"]) if cache["cuando"] else None})
+            return
+        if path == "/prueba":
+            if not m_lock.acquire(blocking=False):
+                self._json({"ocupado": True, "pagina": pagina["estado"], "parcial": vivo.get("texto", "")})
                 return
-            with m_lock:
-                try:
-                    info = leer()
-                    txt = info.get("texto") or ""
-                    if not txt.strip():
-                        if time.time() - pagina["desde"] > 120:
-                            lanzar_calentar()
-                        self._json({"ocupado": False, "texto": "", "cargando": True})
-                        return
-                    pagina["estado"] = "lista"
-                    self._json({"ocupado": False, "texto": txt[-4000:], "escribiendo": info.get("escribiendo", False)})
-                except Exception as e:
-                    self._json({"ocupado": False, "texto": "", "error": str(e)})
+            try:
+                r = {"ejecuta_script": js("return 2+2"),
+                     "url_actual": js(JS_URL),
+                     "titulo": js(JS_TITULO),
+                     "cuadros_de_texto": js(JS_COMPOSER),
+                     "parece_login": js(JS_LOGIN),
+                     "largo_texto": js("return ((document.querySelector('main')||document.body).innerText||'').length")}
+            except Exception as e:
+                r = {"error": str(e)}
+            finally:
+                m_lock.release()
+            r["pagina"] = pagina["estado"]
+            r["destino_configurado"] = destino_actual()
+            self._json(r)
             return
         if path == "/destino":
             self._json({"destino": destino_actual()})
             return
         if path == "/debug":
-            if m_lock.locked():
+            if not m_lock.acquire(blocking=False):
                 self._json({"ocupado": True, "parcial": vivo.get("texto", ""),
-                            "pagina": pagina["estado"],
+                            "pagina": pagina["estado"], "detalle": pagina["detalle"],
                             "destino_configurado": destino_actual()})
                 return
-            with m_lock:
-                try:
-                    info = {
-                        "url_actual": js("location.href"),
-                        "titulo": js("document.title"),
-                        "composer_encontrado": js(JS_COMPOSER),
-                        "parece_pantalla_de_login": js("!!document.body && /log in|sign in|iniciar sesi|continuar con/i.test(document.body.innerText||'')"),
-                    }
-                except Exception as e:
-                    info = {"error": str(e)}
+            try:
+                info = {"url_actual": js(JS_URL), "titulo": js(JS_TITULO),
+                        "composer_encontrado": bool(js(JS_COMPOSER)),
+                        "parece_pantalla_de_login": bool(js(JS_LOGIN))}
+            except Exception as e:
+                info = {"error": str(e)}
+            finally:
+                m_lock.release()
             info["pagina"] = pagina["estado"]
             info["destino_configurado"] = destino_actual()
             self._json(info)
+            return
+        if path == "/recargar":
+            ir_al_destino(forzar=True)
+            self._json({"navegando": True, "destino": destino_actual()})
             return
         self._json({"error": "ruta desconocida"}, 404)
     def do_POST(self):
@@ -425,13 +484,16 @@ class H(BaseHTTPRequestHandler):
                 self._json({"error": "el destino debe ser una pagina de Notion (notion.so/...)", "destino": destino_actual()}, 400)
                 return
             open(DESTINO_FILE, "w").write(cuerpo + "\n")
-            lanzar_calentar(forzar=True)   # navega YA a la nueva pagina
+            cache["texto"] = ""
+            cache["cuando"] = 0
+            ir_al_destino(forzar=True)
             self._json({"destino": cuerpo, "navegando": True})
             return
         self._json({"error": "ruta desconocida"}, 404)
 
 if __name__ == "__main__":
-    lanzar_calentar()   # precarga Notion apenas arranca el servidor
+    threading.Thread(target=lector, daemon=True).start()
+    ir_al_destino()
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
 PYEOF
   oc exec -i "$POD" -- sh -c 'cat > /headless/data/chat/chat.html' <<'HTMLEOF'
@@ -459,18 +521,20 @@ PYEOF
   textarea { flex:1; resize:none; height:52px; }
   #cfg { display:none; width:100%; }
   #cfg input { flex:1; }
+  #pill { font-size:12px; color:#8b93a3; }
   #espejo { display:none; flex:1; overflow-y:auto; margin:0; padding:14px; white-space:pre-wrap; word-wrap:break-word; font:13px/1.5 ui-monospace, Menlo, monospace; color:#c9d1d9; }
 </style>
 </head>
 <body>
 <header>
   <b>⚡ Notion AI — modo ligero</b>
-  <button id="bespejo" type="button" title="Espejo: ver la pagina en texto, en vivo">🪞</button>
+  <span id="pill"></span>
+  <button id="bespejo" type="button" title="Espejo: la pagina en texto, en vivo">🪞</button>
   <button id="bcfg" type="button">⚙</button>
 </header>
 <header id="cfg">
   <input id="clave" placeholder="clave" type="password">
-  <input id="destino" placeholder="URL de tu pagina/chat de Notion (notion.so/...)">
+  <input id="destino" placeholder="URL de tu chat de Notion AI (notion.so/...)">
   <button id="bg" type="button">Guardar</button>
 </header>
 <div id="msgs"></div>
@@ -506,6 +570,17 @@ function api(path, opts) {
   opts.headers = Object.assign({"X-Clave": clave}, opts.headers || {});
   return fetch(path, opts).then(function(r){ return r.json(); });
 }
+function tickSalud() {
+  fetch("/salud").then(function(r){ return r.json(); }).then(function(d) {
+    var p = d.pagina || "?";
+    var etiquetas = {lista: "✓ pagina lista", cargando: "⏳ cargando Notion...",
+      navegando: "⏳ abriendo la pagina...", login: "⚠ pide iniciar sesion",
+      "sin-composer": "⚠ sin cuadro de chat", error: "⚠ error", iniciando: "⏳ iniciando..."};
+    $("pill").textContent = etiquetas[p] || p;
+  }).catch(function(){});
+  setTimeout(tickSalud, 6000);
+}
+tickSalud();
 $("bcfg").onclick = function() {
   var c = $("cfg");
   c.style.display = (c.style.display === "flex") ? "none" : "flex";
@@ -520,7 +595,7 @@ $("bespejo").onclick = function() {
 function tickEspejo() {
   if (!espejoOn) return;
   api("/espejo").then(function(d) {
-    $("espejo").textContent = d.texto || (d.error ? ("⚠ " + d.error) : "cargando Notion en el navegador oculto... (la primera vez tarda 1-2 min)");
+    $("espejo").textContent = d.texto || "cargando Notion en el navegador oculto... (la primera vez tarda 1-2 min)";
   }).catch(function(){});
   setTimeout(tickEspejo, 4000);
 }
@@ -529,7 +604,7 @@ $("bg").onclick = function() {
   localStorage.setItem("nl_clave", clave);
   var d = $("destino").value.trim();
   var p = d ? api("/destino", {method:"POST", body:d}) : Promise.resolve();
-  p.then(function(r){ if (r && r.error) { add("estado", "⚠ " + r.error); } else { add("estado", "guardado ✓ — cargando la nueva pagina (1-2 min)..."); } });
+  p.then(function(r){ if (r && r.error) { add("estado", "⚠ " + r.error); } else { add("estado", "guardado ✓ — abriendo la pagina (1-2 min)..."); } });
 };
 function enviar() {
   var t = $("t").value.trim();
@@ -581,26 +656,27 @@ if (!clave) $("bcfg").click();
 HTMLEOF
 
   log "Cambiando a modo LIGERO dentro del pod..."
-  oc exec -i "$POD" -- sh -s <<'INNER'
+  oc exec -i "$POD" -- env SIGILO="$SIGILO" sh -s <<'INNER'
 set -e
 D=/headless/data
-# 1. apagar vigilante + firefox de pantalla (el perfil queda libre)
-pkill -f 'firefo\[x\]' 2>/dev/null || true
 pkill -f 'vigilante' 2>/dev/null || true
 pkill -f "$D/firefox/firefox" 2>/dev/null || true
 sleep 2
-# 2. clave del chat (se genera una sola vez)
 if [ ! -s "$D/chat/clave.txt" ]; then
   head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$D/chat/clave.txt"
 fi
-# 3. firefox headless con marionette (MISMO perfil = mismo login)
+if [ "${SIGILO:-0}" = "1" ]; then
+  UJ="$D/ff-notion/user.js"
+  touch "$UJ" 2>/dev/null || true
+  grep -q 'dom.webdriver.enabled' "$UJ" 2>/dev/null || \
+    echo 'user_pref("dom.webdriver.enabled", false);' >> "$UJ"
+  echo "   [i] modo sigilo: navigator.webdriver oculto"
+fi
 MOZ_HEADLESS=1 nohup "$D/firefox/firefox" --headless --marionette --profile "$D/ff-notion" >/dev/null 2>&1 &
-# 4. servidor del chat (reinicio limpio)
 pkill -f 'chat/server.py' 2>/dev/null || true
 sleep 1
 nohup python3 "$D/chat/server.py" >/dev/null 2>&1 &
-# 5. verificacion
-sleep 2
+sleep 3
 if pgrep -f 'marionette' >/dev/null 2>&1; then
   echo "   [OK] firefox headless corriendo"
 else
@@ -621,22 +697,30 @@ INNER
   cat <<FIN
 
 ============================================================
- ✅ MODO LIGERO ACTIVO (v1.5 experimental)
+ ✅ MODO LIGERO ACTIVO (v1.6 — arreglo de raiz)
 ------------------------------------------------------------
  Abre en tu PC/telefono:  https://$RUTA/
  Clave (te la pide una vez, boton ⚙): $CLAVE
 ------------------------------------------------------------
- · NUEVO: cambiar el destino (⚙) navega YA a la pagina nueva.
- · NUEVO: el espejo dice "cargando" sin estorbar mientras
-   Notion termina de cargar.
- · Diagnostico sin bloqueo:  https://$RUTA/salud
-   y  https://$RUTA/debug?clave=$CLAVE
-   (ambos reportan el estado de la pagina)
+ QUE SE ARREGLO: los scripts que leen la pagina no llevaban
+ "return", asi que TODO volvia vacio (espejo en blanco,
+ cuadro de texto nunca detectado, candado ocupado).
+
+ AHORA la mini-web muestra arriba el estado de la pagina:
+   ⏳ cargando Notion...   ✓ pagina lista
+   ⚠ pide iniciar sesion  ⚠ sin cuadro de chat
+
+ Espera a ver "✓ pagina lista" (1-2 min) y escribe.
 ------------------------------------------------------------
- OJO: el destino debe ser un CHAT de Notion AI (con cuadro
- "Pregunta..."). Si es una pagina de documento normal, el
- puente escribiria texto EN el documento.
- Si algo falla: sh modo.sh pantalla
+ Autodiagnostico en 1 golpe:
+   https://$RUTA/prueba?clave=$CLAVE
+ Estado general:  https://$RUTA/salud
+ Reabrir pagina:  https://$RUTA/recargar?clave=$CLAVE
+------------------------------------------------------------
+ Si "pide iniciar sesion": sh modo.sh pantalla → entra a
+ Notion con email+codigo → sh modo.sh ligero
+ Si sospechas bloqueo por automatizacion:
+   SIGILO=1 sh modo.sh ligero
 ============================================================
 FIN
   ;;
