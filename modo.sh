@@ -1,12 +1,12 @@
 #!/bin/sh
 # ============================================================
 #  modo.sh — interruptor de nav1: PANTALLA (VNC) <-> LIGERO (texto)
-#  v1.3 EXPERIMENTAL
-#    · el headless PRECARGA Notion apenas arranca (antes la pagina
-#      quedaba en blanco hasta la primera pregunta y el espejo no
-#      mostraba nada)
-#    · el destino guardado se AUTOVALIDA: si no es de Notion se
-#      resetea solo (sanaea el destino malo de pruebas anteriores)
+#  v1.4 EXPERIMENTAL
+#    · /salud ahora diagnostica SIN bloquearse: firefox vivo,
+#      marionette escuchando/ocupado/caido, destino en uso
+#    · /debug ya NUNCA se cuelga: si el headless esta ocupado
+#      responde de inmediato con el texto parcial
+#  v1.3 · precarga Notion al arrancar + autovalida destino
 #  v1.2 · respuesta en vivo (texto parcial) + boton Espejo 🪞
 #  v1.1 · destino validado (solo URLs de Notion) + /debug
 #  v1.0 · Firefox headless + Marionette + mini chat web de texto
@@ -151,6 +151,17 @@ def conectar():
 
 def js(script):
     return valor(conectar().cmd("WebDriver:ExecuteScript", {"script": script, "args": []}))
+
+def marionette_vivo():
+    # sondea el saludo de Marionette SIN sesion (solo si no hay cliente activo)
+    try:
+        s = socket.create_connection(("127.0.0.1", 2828), timeout=5)
+        s.settimeout(5)
+        data = s.recv(4096)
+        s.close()
+        return b"applicationType" in data or b"arionette" in data
+    except Exception:
+        return False
 
 def destino_actual():
     # autovalida: si lo guardado no es de Notion, vuelve al default
@@ -303,7 +314,15 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/salud":
-            self._json({"ok": True, "modo": "ligero"})
+            ff = (os.system("pgrep -f marionette >/dev/null 2>&1") == 0)
+            if _m is not None:
+                m = "conectado (sesion activa)"
+            elif m_lock.locked():
+                m = "ocupado (trabajando)"
+            else:
+                m = "escuchando" if marionette_vivo() else "NO responde"
+            self._json({"ok": True, "modo": "ligero", "firefox_headless": ff,
+                        "marionette": m, "destino": destino_actual()})
             return
         if path == "/" or path == "/chat.html":
             data = open(HTML, "rb").read()
@@ -345,6 +364,10 @@ class H(BaseHTTPRequestHandler):
             self._json({"destino": destino_actual()})
             return
         if path == "/debug":
+            if m_lock.locked():
+                self._json({"ocupado": True, "parcial": vivo.get("texto", ""),
+                            "destino_configurado": destino_actual()})
+                return
             with m_lock:
                 try:
                     info = {
@@ -577,19 +600,17 @@ INNER
   cat <<FIN
 
 ============================================================
- ✅ MODO LIGERO ACTIVO (v1.3 experimental)
+ ✅ MODO LIGERO ACTIVO (v1.4 experimental)
 ------------------------------------------------------------
  Abre en tu PC/telefono:  https://$RUTA/
  Clave (te la pide una vez, boton ⚙): $CLAVE
 ------------------------------------------------------------
- · NUEVO: el headless PRECARGA Notion al arrancar (el espejo
-   tarda 1-2 min la primera vez en llenarse — es normal).
- · La respuesta se va viendo MIENTRAS se genera.
- · Boton 🪞 = espejo de texto de la pagina (cada 4 s).
- · El DESTINO (boton ⚙) debe ser una pagina de NOTION;
-   si quedo uno malo guardado, se resetea solo a
-   https://www.notion.so/chat
- · Diagnostico: https://$RUTA/debug?clave=$CLAVE
+ · DIAGNOSTICO RAPIDO (no se cuelga): abre
+   https://$RUTA/salud
+   y comparte el JSON — dice si firefox vive y si el
+   canal de control (marionette) responde.
+ · /debug?clave=$CLAVE ya nunca se cuelga tampoco.
+ · El espejo tarda 1-2 min la primera vez (precarga).
 ------------------------------------------------------------
  Si algo falla: vuelve a la normalidad con
    sh modo.sh pantalla
