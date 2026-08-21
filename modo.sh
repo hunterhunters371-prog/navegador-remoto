@@ -1,20 +1,15 @@
 #!/bin/sh
 # ============================================================
 #  modo.sh — interruptor de nav1: PANTALLA (VNC) <-> LIGERO (texto)
-#  v1.6 — ARREGLO DE RAIZ
-#    · BUG CAUSA RAIZ: en WebDriver/Marionette el script se ejecuta
-#      como CUERPO DE FUNCION -> sin "return" todo devolvia undefined.
-#      Por eso el espejo salia vacio, el composer nunca se detectaba
-#      y el candado quedaba ocupado reintentando. Ahora TODOS los
-#      scripts llevan return.
-#    · navegacion con el comando nativo WebDriver:Navigate (antes se
-#      asignaba location.href dentro de un script, sin esperar carga)
-#    · lector en 2do plano cachea el texto: el espejo ya no compite
-#      por el candado (lee del cache, nunca bloquea)
-#    · sesion Marionette se auto-reconecta si un comando falla
-#    · nuevo /prueba?clave=... : autodiagnostico en 1 golpe
-#    · opcional SIGILO=1 sh modo.sh ligero  ->  oculta
-#      navigator.webdriver (solo si sospechamos deteccion)
+#  v1.7 — TRES FUNCIONES NUEVAS (sobre el arreglo de raiz de v1.6)
+#    · 🤖 Elegir IA: abre el selector de modelo de Notion, lista las
+#      opciones reales y elige la que pidas.
+#    · 📎 Archivos: subes desde el telefono -> se guardan en el pod ->
+#      se adjuntan al chat (input[type=file] nativo, y si falla,
+#      plan B pegando el archivo con DataTransfer).
+#    · ⚙ Cuenta: abre Cuenta / Notificaciones / Conexiones / Espacio
+#      de Notion en el navegador oculto, te las muestra en texto y
+#      puedes pulsar cualquier boton de esas pantallas.
 #
 #  Uso (terminal web de OpenShift, icono >_):
 #    sh modo.sh ligero     → activa/actualiza el chat de texto
@@ -62,21 +57,30 @@ spec:
 SVC
   oc create route edge "$APP-chat" --service "$APP-chat" --port $CHAT_PORT --insecure-policy Redirect 2>/dev/null || true
 
-  log "Instalando el puente v1.6 en el volumen persistente..."
-  oc exec -i "$POD" -- sh -c 'mkdir -p /headless/data/chat'
+  log "Instalando el puente v1.7 en el volumen persistente..."
+  oc exec -i "$POD" -- sh -c 'mkdir -p /headless/data/chat /headless/data/subidas'
   oc exec -i "$POD" -- sh -c 'cat > /headless/data/chat/server.py' <<'PYEOF'
 #!/usr/bin/env python3
-# server.py v1.6 - puente de texto <-> Notion AI (Firefox headless + Marionette)
+# server.py v1.7 - puente de texto <-> Notion AI (Firefox headless + Marionette)
 # Solo stdlib. Lo instala modo.sh en /headless/data/chat/
-import json, os, socket, threading, time
+import base64, json, mimetypes, os, re, socket, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 BASE = "/headless/data/chat"
+SUBIDAS = "/headless/data/subidas"
 CLAVE = open(os.path.join(BASE, "clave.txt")).read().strip()
 DESTINO_FILE = os.path.join(BASE, "destino.txt")
+MODELO_FILE = os.path.join(BASE, "modelo.txt")
 DESTINO_DEFAULT = "https://www.notion.so/chat"
+if "{" in DESTINO_DEFAULT:                       # red de seguridad
+    DESTINO_DEFAULT = "https://www." + "notion.so/"
+LIMITE = 20 * 1024 * 1024                        # 20 MB por archivo
 PORT = int(os.environ.get("CHAT_PORT", "6902"))
+try:
+    os.makedirs(SUBIDAS)
+except Exception:
+    pass
 
 jobs = {}
 contador = [0]
@@ -168,12 +172,15 @@ def cmd(nombre, params=None):
         soltar()   # sesion posiblemente desincronizada: reconectar luego
         raise
 
-# CLAVE DEL ARREGLO v1.6: el script va como CUERPO de funcion -> necesita return
+# OJO (arreglo de v1.6): el script va como CUERPO de funcion -> necesita return
 def js(script):
     return cmd("WebDriver:ExecuteScript", {"script": script, "args": []})
 
 def navegar(url):
     return cmd("WebDriver:Navigate", {"url": url})
+
+def tomar(seg=20):
+    return m_lock.acquire(True, seg)
 
 def marionette_vivo():
     try:
@@ -188,12 +195,40 @@ def marionette_vivo():
 def destino_actual():
     if os.path.exists(DESTINO_FILE):
         d = open(DESTINO_FILE).read().strip()
-        if d and "notion" in d.lower():
+        if d and "notion" in d.lower() and "{" not in d:
             return d
     return DESTINO_DEFAULT
 
+def modelo_actual():
+    if os.path.exists(MODELO_FILE):
+        return open(MODELO_FILE).read().strip()
+    return ""
+
+def nombre_seguro(n):
+    n = os.path.basename((n or "archivo").strip())
+    n = re.sub(r"[^A-Za-z0-9._\- ]", "_", n)[:120]
+    return n or "archivo"
+
+def lista_subidas():
+    out = []
+    try:
+        for n in sorted(os.listdir(SUBIDAS)):
+            p = os.path.join(SUBIDAS, n)
+            if os.path.isfile(p):
+                out.append({"nombre": n, "kb": int(os.path.getsize(p) / 1024) or 1})
+    except Exception:
+        pass
+    return out
+
+# ---------------- scripts inyectados (TODOS con return) ----------------
+SEL_CTRL = ('button, a[href], [role="button"], [role="menuitem"], '
+            '[role="menuitemradio"], [role="tab"], [role="option"], '
+            '[role="switch"], [role="checkbox"], select')
+VIS = 'function vis(e){ return e.offsetParent !== null; }\n'
+
 JS_URL = "return location.href"
 JS_TITULO = "return document.title"
+JS_TEXTO = "return ((document.querySelector('main')||document.body).innerText||'').slice(0,6000)"
 JS_COMPOSER = """
 const eds = [...document.querySelectorAll('div[contenteditable="true"]')]
   .filter(e => e.offsetParent !== null);
@@ -222,6 +257,121 @@ ed.dispatchEvent(new KeyboardEvent("keydown",
 return "enviado";
 """
 
+# --- zona del composer: la barra de herramientas donde viven el selector
+#     de modelo y el boton de adjuntar ---
+JS_ZONA = VIS + """
+function zona(){
+  const eds = [...document.querySelectorAll('div[contenteditable="true"]')].filter(vis);
+  if (!eds.length) return document.body;
+  let p = eds[eds.length - 1];
+  for (let i = 0; i < 6 && p.parentElement; i++) p = p.parentElement;
+  return p;
+}
+"""
+JS_ABRIR_MODELO = JS_ZONA + """
+const re = /gpt|claude|sonnet|opus|haiku|gemini|llama|mistral|deepseek|grok|auto|r[aá]pid|fast|advanc|avanzad|thinking|razona|model/i;
+function cand(raiz){
+  return [...raiz.querySelectorAll('button, div[role="button"]')].filter(vis)
+    .filter(b => re.test((b.innerText || "") + " " + (b.getAttribute("aria-label") || "")));
+}
+let bs = cand(zona());
+if (!bs.length) bs = cand(document);
+if (!bs.length) return JSON.stringify({ok:false});
+const b = bs[bs.length - 1];
+const etiqueta = ((b.innerText || b.getAttribute("aria-label") || "").trim().split("\\n")[0]).slice(0,60);
+b.click();
+return JSON.stringify({ok:true, etiqueta: etiqueta});
+"""
+JS_MENU = VIS + """
+const it = [...document.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="option"]')]
+  .filter(vis)
+  .map(e => ((e.innerText || "").trim().split("\\n")[0]).slice(0,60))
+  .filter(t => t.length > 0);
+return JSON.stringify([...new Set(it)]);
+"""
+JS_CLIC_MENU = VIS + """
+const q = %s.toLowerCase();
+const it = [...document.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="option"]')].filter(vis);
+const t = it.find(e => (e.innerText || "").toLowerCase().indexOf(q) >= 0);
+if (!t) return "no-esta";
+t.click();
+return "elegido";
+"""
+JS_ESC = """
+document.dispatchEvent(new KeyboardEvent("keydown",
+  {key:"Escape", code:"Escape", keyCode:27, which:27, bubbles:true}));
+return "esc";
+"""
+
+# --- archivos ---
+JS_INPUTS = "return document.querySelectorAll('input[type=file]').length"
+JS_CLIC_ADJUNTAR = JS_ZONA + """
+const re = /adjunt|attach|upload|subir|archivo|file|clip|imagen|image|a[ñn]adir|add/i;
+const bs = [...zona().querySelectorAll('button, div[role="button"], [aria-label]')].filter(vis);
+const b = bs.find(x => re.test((x.getAttribute("aria-label") || "") + " " + (x.title || "")));
+if (!b) return "sin-boton";
+b.click();
+return "clic";
+"""
+JS_DESTAPAR = """
+const ins = [...document.querySelectorAll('input[type=file]')];
+ins.forEach(i => {
+  i.removeAttribute("hidden");
+  i.style.display = "block"; i.style.visibility = "visible"; i.style.opacity = "1";
+  i.style.position = "fixed"; i.style.left = "0px"; i.style.top = "0px";
+  i.style.width = "80px"; i.style.height = "30px"; i.style.zIndex = "999999";
+});
+return ins.length;
+"""
+JS_PEGAR = VIS + """
+const bin = atob(%s);
+const arr = new Uint8Array(bin.length);
+for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+const f = new File([arr], %s, {type: %s});
+const eds = [...document.querySelectorAll('div[contenteditable="true"]')].filter(vis);
+if (!eds.length) return "sin-composer";
+const ed = eds[eds.length - 1];
+ed.focus();
+const dt = new DataTransfer();
+dt.items.add(f);
+ed.dispatchEvent(new ClipboardEvent("paste", {clipboardData: dt, bubbles: true, cancelable: true}));
+return "pegado";
+"""
+
+# --- navegar la interfaz de Notion por texto (cuenta, ajustes, etc.) ---
+JS_CONTROLES = VIS + """
+const els = [...document.querySelectorAll('%s')].filter(vis);
+const out = [];
+els.forEach((e, i) => {
+  const t = ((e.innerText || e.getAttribute("aria-label") || e.title || "").trim().split("\\n")[0]).slice(0,70);
+  if (t) out.push({i: i, t: t});
+});
+return JSON.stringify(out.slice(0, 90));
+""" % SEL_CTRL
+JS_CLIC_I = VIS + """
+const els = [...document.querySelectorAll('%s')].filter(vis);
+const e = els[%%d];
+if (!e) return "no-esta";
+try { e.scrollIntoView({block:"center"}); } catch (x) {}
+e.click();
+return "clic: " + ((e.innerText || e.getAttribute("aria-label") || "").trim().split("\\n")[0]).slice(0,60);
+""" % SEL_CTRL
+JS_CLIC_T = VIS + """
+const q = %%s.toLowerCase();
+const els = [...document.querySelectorAll('%s')].filter(vis);
+const e = els.find(x => ((x.innerText || x.getAttribute("aria-label") || "").toLowerCase().indexOf(q) >= 0));
+if (!e) return "no-esta";
+try { e.scrollIntoView({block:"center"}); } catch (x) {}
+e.click();
+return "clic: " + ((e.innerText || "").trim().split("\\n")[0]).slice(0,60);
+""" % SEL_CTRL
+JS_CORREO = """
+const t = (document.body && document.body.innerText) || "";
+const m = t.match(/[A-Za-z0-9._%%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/);
+return m ? m[0] : "";
+"""
+
+# ---------------- logica ----------------
 def leer():
     try:
         d = json.loads(js(JS_LEER) or "{}")
@@ -272,6 +422,28 @@ def ir_al_destino(forzar=False):
             _navegando[0] = False
     threading.Thread(target=run, daemon=True).start()
 
+def ir_a_url(url):
+    if _navegando[0]:
+        return
+    _navegando[0] = True
+    def run():
+        try:
+            with m_lock:
+                pagina["estado"] = "navegando"
+                pagina["detalle"] = url
+                navegar(url)
+                time.sleep(2)
+                pagina["estado"] = "otra-pagina"
+                info = leer()
+                cache["texto"] = info["texto"][-6000:]
+                cache["cuando"] = time.time()
+        except Exception as e:
+            pagina["estado"] = "error"
+            pagina["detalle"] = str(e)
+        finally:
+            _navegando[0] = False
+    threading.Thread(target=run, daemon=True).start()
+
 def asegurar_pagina():
     destino = destino_actual()
     actual = ""
@@ -293,6 +465,69 @@ def asegurar_pagina():
         raise RuntimeError("Notion pide iniciar sesion en el navegador oculto: corre 'sh m.sh pantalla', entra con email+codigo y vuelve con 'sh m.sh ligero'")
     pagina["estado"] = "sin-composer"
     raise RuntimeError("no aparecio el cuadro de texto: el destino puede no ser un chat de Notion AI, o la pagina cargo demasiado lento")
+
+def listo_para_actuar():
+    if not js(JS_COMPOSER):
+        raise RuntimeError("la pagina aun no esta lista (espera a ver 'pagina lista' arriba)")
+
+def modelos():
+    listo_para_actuar()
+    d = json.loads(js(JS_ABRIR_MODELO) or "{}")
+    if not d.get("ok"):
+        return {"actual": modelo_actual(),
+                "modelos": [],
+                "nota": "no encontre el selector de modelo en esta pagina"}
+    time.sleep(1.5)
+    items = json.loads(js(JS_MENU) or "[]")
+    js(JS_ESC)
+    return {"actual": d.get("etiqueta") or modelo_actual(), "modelos": items}
+
+def elegir_modelo(nombre):
+    listo_para_actuar()
+    d = json.loads(js(JS_ABRIR_MODELO) or "{}")
+    if not d.get("ok"):
+        raise RuntimeError("no encontre el selector de modelo en esta pagina")
+    time.sleep(1.5)
+    r = js(JS_CLIC_MENU % json.dumps(nombre))
+    if r != "elegido":
+        js(JS_ESC)
+        raise RuntimeError("no encontre la opcion '%s' en el menu" % nombre)
+    time.sleep(0.5)
+    open(MODELO_FILE, "w").write(nombre + "\n")
+    return nombre
+
+def adjuntar(nombre):
+    ruta = os.path.join(SUBIDAS, nombre)
+    if not os.path.isfile(ruta):
+        raise RuntimeError("ese archivo no esta subido")
+    listo_para_actuar()
+    via = None
+    try:
+        n = js(JS_INPUTS)
+        if not n:
+            js(JS_CLIC_ADJUNTAR)
+            time.sleep(2)
+            n = js(JS_INPUTS)
+        if n:
+            js(JS_DESTAPAR)
+            el = cmd("WebDriver:FindElement", {"using": "css selector", "value": "input[type=file]"})
+            eid = list(el.values())[0] if isinstance(el, dict) else el
+            cmd("WebDriver:ElementSendKeys", {"id": eid, "text": ruta})
+            via = "selector de archivos"
+    except Exception as e:
+        pagina["detalle"] = "input file: %s" % e
+    if via is None:
+        tam = os.path.getsize(ruta)
+        if tam > 3 * 1024 * 1024:
+            raise RuntimeError("no pude usar el selector de archivos de Notion y el archivo pasa de 3 MB para el plan B")
+        datos = base64.b64encode(open(ruta, "rb").read()).decode("ascii")
+        tipo = mimetypes.guess_type(nombre)[0] or "application/octet-stream"
+        r = js(JS_PEGAR % (json.dumps(datos), json.dumps(nombre), json.dumps(tipo)))
+        if r != "pegado":
+            raise RuntimeError("no pude adjuntar el archivo (%s)" % r)
+        via = "pegado en el cuadro de texto"
+    time.sleep(1)
+    return via
 
 def extraer(actual, base, prompt):
     nuevo = actual[len(base):] if (base and actual.startswith(base)) else actual
@@ -319,7 +554,7 @@ def trabajar(job_id, texto):
                 info = leer()
                 cand = extraer(info["texto"], base, texto)
                 vivo["texto"] = cand
-                cache["texto"] = info["texto"][-4000:]
+                cache["texto"] = info["texto"][-6000:]
                 cache["cuando"] = time.time()
                 if info["escribiendo"]:
                     anterior = cand
@@ -346,7 +581,7 @@ def lector():
         try:
             info = leer()
             if info["texto"].strip():
-                cache["texto"] = info["texto"][-4000:]
+                cache["texto"] = info["texto"][-6000:]
                 cache["cuando"] = time.time()
                 cache["escribiendo"] = info["escribiendo"]
                 if pagina["estado"] in ("iniciando", "cargando", "por-verificar"):
@@ -373,8 +608,20 @@ class H(BaseHTTPRequestHandler):
             return True
         q = parse_qs(urlparse(self.path).query)
         return q.get("clave", [None])[0] == CLAVE
+    def _accion(self, fn, seg=20):
+        if not tomar(seg):
+            self._json({"ocupado": True, "pagina": pagina["estado"],
+                        "parcial": vivo.get("texto", "")})
+            return
+        try:
+            self._json(fn())
+        except Exception as e:
+            self._json({"error": str(e), "pagina": pagina["estado"]})
+        finally:
+            m_lock.release()
     def do_GET(self):
         path = urlparse(self.path).path
+        q = parse_qs(urlparse(self.path).query)
         if path == "/salud":
             ff = (os.system("pgrep -f marionette >/dev/null 2>&1") == 0)
             if _m is not None:
@@ -383,8 +630,9 @@ class H(BaseHTTPRequestHandler):
                 m = "ocupado (trabajando)"
             else:
                 m = "escuchando" if marionette_vivo() else "NO responde"
-            self._json({"ok": True, "version": "1.6", "firefox_headless": ff,
+            self._json({"ok": True, "version": "1.7", "firefox_headless": ff,
                         "marionette": m, "destino": destino_actual(),
+                        "modelo": modelo_actual(), "archivos": len(lista_subidas()),
                         "pagina": pagina["estado"], "detalle": pagina["detalle"],
                         "texto_en_cache": len(cache["texto"]),
                         "cache_hace_seg": int(time.time() - cache["cuando"]) if cache["cuando"] else None})
@@ -401,7 +649,6 @@ class H(BaseHTTPRequestHandler):
             self._json({"error": "clave mala"}, 403)
             return
         if path == "/estado":
-            q = parse_qs(urlparse(self.path).query)
             jid = int(q.get("id", ["0"])[0])
             job = jobs.get(jid, {"listo": False})
             if not job.get("listo") and vivo.get("job") == jid and vivo.get("texto"):
@@ -416,6 +663,33 @@ class H(BaseHTTPRequestHandler):
             self._json({"texto": cache["texto"], "pagina": pagina["estado"],
                         "hace_seg": int(time.time() - cache["cuando"]) if cache["cuando"] else None})
             return
+        if path == "/modelos":
+            self._accion(modelos, 25)
+            return
+        if path == "/archivos":
+            self._json({"archivos": lista_subidas(), "limite_mb": int(LIMITE / 1048576)})
+            return
+        if path == "/controles":
+            self._accion(lambda: {"controles": json.loads(js(JS_CONTROLES) or "[]"),
+                                  "titulo": js(JS_TITULO), "url": js(JS_URL)}, 25)
+            return
+        if path == "/pantalla-texto":
+            if m_lock.acquire(blocking=False):
+                try:
+                    self._json({"texto": js(JS_TEXTO), "titulo": js(JS_TITULO),
+                                "url": js(JS_URL), "pagina": pagina["estado"]})
+                    return
+                except Exception as e:
+                    self._json({"error": str(e)})
+                    return
+                finally:
+                    m_lock.release()
+            self._json({"texto": cache["texto"], "pagina": pagina["estado"], "del_cache": True})
+            return
+        if path == "/cuenta":
+            self._accion(lambda: {"correo": js(JS_CORREO), "titulo": js(JS_TITULO),
+                                  "url": js(JS_URL)}, 20)
+            return
         if path == "/prueba":
             if not m_lock.acquire(blocking=False):
                 self._json({"ocupado": True, "pagina": pagina["estado"], "parcial": vivo.get("texto", "")})
@@ -426,6 +700,7 @@ class H(BaseHTTPRequestHandler):
                      "titulo": js(JS_TITULO),
                      "cuadros_de_texto": js(JS_COMPOSER),
                      "parece_login": js(JS_LOGIN),
+                     "inputs_de_archivo": js(JS_INPUTS),
                      "largo_texto": js("return ((document.querySelector('main')||document.body).innerText||'').length")}
             except Exception as e:
                 r = {"error": str(e)}
@@ -436,7 +711,7 @@ class H(BaseHTTPRequestHandler):
             self._json(r)
             return
         if path == "/destino":
-            self._json({"destino": destino_actual()})
+            self._json({"destino": destino_actual(), "modelo": modelo_actual()})
             return
         if path == "/debug":
             if not m_lock.acquire(blocking=False):
@@ -466,6 +741,28 @@ class H(BaseHTTPRequestHandler):
             self._json({"error": "clave mala"}, 403)
             return
         path = urlparse(self.path).path
+        q = parse_qs(urlparse(self.path).query)
+        # /subir recibe bytes crudos (el nombre va en la URL): sin multipart
+        if path == "/subir":
+            nombre = nombre_seguro(q.get("nombre", ["archivo"])[0])
+            n = int(self.headers.get("Content-Length", "0") or 0)
+            if n <= 0:
+                self._json({"error": "archivo vacio"}, 400)
+                return
+            if n > LIMITE:
+                self._json({"error": "el archivo pasa de %d MB" % int(LIMITE / 1048576)}, 400)
+                return
+            ruta = os.path.join(SUBIDAS, nombre)
+            leidos = 0
+            with open(ruta, "wb") as f:
+                while leidos < n:
+                    c = self.rfile.read(min(65536, n - leidos))
+                    if not c:
+                        break
+                    f.write(c)
+                    leidos += len(c)
+            self._json({"ok": True, "nombre": nombre, "kb": int(leidos / 1024) or 1})
+            return
         n = int(self.headers.get("Content-Length", "0") or 0)
         cuerpo = self.rfile.read(n).decode("utf-8", "replace").strip() if n else ""
         if path == "/preguntar":
@@ -489,6 +786,46 @@ class H(BaseHTTPRequestHandler):
             ir_al_destino(forzar=True)
             self._json({"destino": cuerpo, "navegando": True})
             return
+        if path == "/modelo":
+            nombre = cuerpo or q.get("nombre", [""])[0]
+            if not nombre:
+                self._json({"error": "dime que modelo"}, 400)
+                return
+            self._accion(lambda: {"modelo": elegir_modelo(nombre)}, 25)
+            return
+        if path == "/adjuntar":
+            nombre = nombre_seguro(cuerpo or q.get("nombre", [""])[0])
+            self._accion(lambda: {"adjuntado": nombre, "via": adjuntar(nombre)}, 25)
+            return
+        if path == "/borrar-archivo":
+            nombre = nombre_seguro(cuerpo or q.get("nombre", [""])[0])
+            try:
+                os.remove(os.path.join(SUBIDAS, nombre))
+                self._json({"borrado": nombre})
+            except Exception as e:
+                self._json({"error": str(e)}, 400)
+            return
+        if path == "/ir":
+            url = cuerpo or q.get("url", [""])[0]
+            if "notion" not in url.lower():
+                self._json({"error": "solo puedo abrir paginas de Notion"}, 400)
+                return
+            ir_a_url(url)
+            self._json({"navegando": True, "url": url})
+            return
+        if path == "/clic":
+            if "i" in q:
+                idx = int(q["i"][0])
+                fn = lambda: {"resultado": js(JS_CLIC_I % idx), "texto": (time.sleep(1.5), js(JS_TEXTO))[1]}
+            else:
+                txt = cuerpo or q.get("texto", [""])[0]
+                fn = lambda: {"resultado": js(JS_CLIC_T % json.dumps(txt)), "texto": (time.sleep(1.5), js(JS_TEXTO))[1]}
+            self._accion(fn, 25)
+            return
+        if path == "/volver":
+            ir_al_destino(forzar=True)
+            self._json({"navegando": True, "destino": destino_actual()})
+            return
         self._json({"error": "ruta desconocida"}, 404)
 
 if __name__ == "__main__":
@@ -508,8 +845,9 @@ PYEOF
   body { margin:0; font:15px/1.5 system-ui, sans-serif; background:#0f1115; color:#e8e8ea; display:flex; flex-direction:column; height:100vh; }
   header { padding:10px 14px; background:#171a21; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
   header b { margin-right:auto; }
-  input, button, textarea { font:inherit; color:inherit; background:#22262f; border:1px solid #333947; border-radius:8px; padding:8px 10px; }
+  input, button, textarea, select { font:inherit; color:inherit; background:#22262f; border:1px solid #333947; border-radius:8px; padding:8px 10px; }
   button { background:#2f6fed; border-color:#2f6fed; cursor:pointer; }
+  button.gris { background:#22262f; border-color:#333947; }
   button:disabled { opacity:.5; }
   #msgs { flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px; }
   .m { max-width:85%; padding:10px 12px; border-radius:12px; white-space:pre-wrap; word-wrap:break-word; }
@@ -523,20 +861,26 @@ PYEOF
   #cfg input { flex:1; }
   #pill { font-size:12px; color:#8b93a3; }
   #espejo { display:none; flex:1; overflow-y:auto; margin:0; padding:14px; white-space:pre-wrap; word-wrap:break-word; font:13px/1.5 ui-monospace, Menlo, monospace; color:#c9d1d9; }
+  #panel { display:none; flex:1; overflow-y:auto; padding:14px; }
+  #panel h3 { margin:0 0 4px; font-size:16px; }
+  .sub { color:#8b93a3; font-size:13px; margin:4px 0 10px; }
+  .fila { display:flex; gap:8px; align-items:center; margin:6px 0; flex-wrap:wrap; }
+  .opt { display:block; width:100%; text-align:left; margin:6px 0; background:#1d212b; border-color:#2a2f3a; }
+  .opt.sel { background:#2f6fed; border-color:#2f6fed; }
+  .chip { background:#1d212b; border:1px solid #2a2f3a; border-radius:8px; padding:6px 8px; font-size:13px; }
+  pre.mini { background:#0b0d11; border:1px solid #222733; border-radius:8px; padding:10px; white-space:pre-wrap; word-wrap:break-word; font:12px/1.45 ui-monospace, monospace; max-height:38vh; overflow:auto; color:#c9d1d9; }
 </style>
 </head>
 <body>
 <header>
-  <b>⚡ Notion AI — modo ligero</b>
+  <b>⚡ Notion AI</b>
   <span id="pill"></span>
-  <button id="bespejo" type="button" title="Espejo: la pagina en texto, en vivo">🪞</button>
-  <button id="bcfg" type="button">⚙</button>
+  <button id="bmodelo" class="gris" type="button" title="Elegir IA">🤖</button>
+  <button id="barch" class="gris" type="button" title="Archivos">📎</button>
+  <button id="bespejo" class="gris" type="button" title="Espejo de la pagina">🪞</button>
+  <button id="bcfg" class="gris" type="button" title="Ajustes y cuenta">⚙</button>
 </header>
-<header id="cfg">
-  <input id="clave" placeholder="clave" type="password">
-  <input id="destino" placeholder="URL de tu chat de Notion AI (notion.so/...)">
-  <button id="bg" type="button">Guardar</button>
-</header>
+<div id="panel"></div>
 <div id="msgs"></div>
 <pre id="espejo"></pre>
 <footer>
@@ -545,18 +889,15 @@ PYEOF
 </footer>
 <script>
 var $ = function(id){ return document.getElementById(id); };
-var msgs = $("msgs");
+var msgs = $("msgs"), panel = $("panel");
 var clave = localStorage.getItem("nl_clave") || "";
-$("clave").value = clave;
-var burbuja = null;
-var espejoOn = false;
+var burbuja = null, espejoOn = false;
 
+function esc(s){ return String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
 function add(cls, txt) {
   var d = document.createElement("div");
-  d.className = "m " + cls;
-  d.textContent = txt;
-  msgs.appendChild(d);
-  msgs.scrollTop = msgs.scrollHeight;
+  d.className = "m " + cls; d.textContent = txt;
+  msgs.appendChild(d); msgs.scrollTop = msgs.scrollHeight;
   return d;
 }
 function estado(txt) {
@@ -570,23 +911,159 @@ function api(path, opts) {
   opts.headers = Object.assign({"X-Clave": clave}, opts.headers || {});
   return fetch(path, opts).then(function(r){ return r.json(); });
 }
+function verChat(){ panel.style.display="none"; $("espejo").style.display="none"; espejoOn=false; msgs.style.display="flex"; }
+function verPanel(html){ panel.innerHTML=html; panel.style.display="block"; msgs.style.display="none"; $("espejo").style.display="none"; espejoOn=false; }
+
+/* ---------- estado de la pagina ---------- */
+var ETQ = {lista:"✓ pagina lista", cargando:"⏳ cargando Notion...", navegando:"⏳ abriendo...",
+  login:"⚠ pide iniciar sesion", "sin-composer":"⚠ sin cuadro de chat", error:"⚠ error",
+  iniciando:"⏳ iniciando...", "otra-pagina":"🔧 en configuracion"};
 function tickSalud() {
   fetch("/salud").then(function(r){ return r.json(); }).then(function(d) {
-    var p = d.pagina || "?";
-    var etiquetas = {lista: "✓ pagina lista", cargando: "⏳ cargando Notion...",
-      navegando: "⏳ abriendo la pagina...", login: "⚠ pide iniciar sesion",
-      "sin-composer": "⚠ sin cuadro de chat", error: "⚠ error", iniciando: "⏳ iniciando..."};
-    $("pill").textContent = etiquetas[p] || p;
+    $("pill").textContent = (ETQ[d.pagina] || d.pagina || "") + (d.modelo ? " · " + d.modelo : "");
   }).catch(function(){});
   setTimeout(tickSalud, 6000);
 }
 tickSalud();
+
+/* ---------- 🤖 elegir IA ---------- */
+$("bmodelo").onclick = function() {
+  verPanel('<h3>🤖 Elegir IA</h3><p class="sub">Abro el selector de modelo de Notion y te muestro las opciones reales.</p><div id="lista">leyendo el selector...</div><div class="fila"><button class="gris" data-a="chat">Volver al chat</button></div>');
+  api("/modelos").then(function(d) {
+    var l = $("lista"), h = "";
+    if (d.error || d.ocupado) { l.textContent = "⚠ " + (d.error || "ocupado ahora mismo, prueba en unos segundos"); return; }
+    if (d.actual) h += '<p class="sub">Ahora: <b>' + esc(d.actual) + '</b></p>';
+    if (!d.modelos || !d.modelos.length) {
+      h += '<p class="sub">' + esc(d.nota || "No encontre opciones de modelo en esta pagina.") + '</p>';
+    } else {
+      for (var i = 0; i < d.modelos.length; i++)
+        h += '<button class="opt" data-m="' + esc(d.modelos[i]) + '">' + esc(d.modelos[i]) + '</button>';
+    }
+    l.innerHTML = h;
+  });
+};
+
+/* ---------- 📎 archivos ---------- */
+function listaArchivos() {
+  api("/archivos").then(function(d) {
+    var h = "", a = d.archivos || [];
+    if (!a.length) h = '<p class="sub">Todavia no has subido nada.</p>';
+    for (var i = 0; i < a.length; i++) {
+      h += '<div class="fila"><span class="chip">' + esc(a[i].nombre) + ' · ' + a[i].kb + ' KB</span>' +
+           '<button data-adj="' + esc(a[i].nombre) + '">Adjuntar al chat</button>' +
+           '<button class="gris" data-del="' + esc(a[i].nombre) + '">🗑</button></div>';
+    }
+    $("lista").innerHTML = h;
+  });
+}
+$("barch").onclick = function() {
+  verPanel('<h3>📎 Archivos</h3><p class="sub">1) Subes el archivo (queda guardado en el servidor). 2) Lo adjuntas al chat. 3) Escribes tu mensaje y envias. Maximo 20 MB.</p>' +
+    '<div class="fila"><input type="file" id="f" multiple></div><div id="lista">cargando...</div>' +
+    '<div class="fila"><button class="gris" data-a="chat">Volver al chat</button></div>');
+  $("f").onchange = function() {
+    var fs = $("f").files, i = 0;
+    (function next() {
+      if (i >= fs.length) { $("f").value = ""; listaArchivos(); return; }
+      var f = fs[i++];
+      $("lista").textContent = "subiendo " + f.name + "...";
+      fetch("/subir?nombre=" + encodeURIComponent(f.name), {method:"POST", headers:{"X-Clave": clave}, body: f})
+        .then(function(r){ return r.json(); }).then(function(){ next(); }).catch(function(){ next(); });
+    })();
+  };
+  listaArchivos();
+};
+
+/* ---------- ⚙ ajustes y cuenta ---------- */
+var PANT = [["Cuenta","my-account"],["Notificaciones","my-notifications"],["Conexiones","my-connections"],["Espacio de trabajo","my-settings"]];
 $("bcfg").onclick = function() {
-  var c = $("cfg");
-  c.style.display = (c.style.display === "flex") ? "none" : "flex";
+  var h = '<h3>⚙ Ajustes</h3>' +
+    '<div class="fila"><input id="clave" type="password" placeholder="clave" value="' + esc(clave) + '"></div>' +
+    '<div class="fila"><input id="destino" placeholder="URL de tu chat de Notion AI" style="flex:1"></div>' +
+    '<div class="fila"><button data-a="guardar">Guardar</button><button class="gris" data-a="recargar">Recargar pagina</button></div>' +
+    '<h3 style="margin-top:16px">👤 Cuenta y configuracion de Notion</h3>' +
+    '<p class="sub">Abro esas pantallas en el navegador oculto y te las muestro en texto. Puedes pulsar sus botones desde aqui. Al enviar un mensaje se vuelve solo al chat.</p><div class="fila">';
+  for (var i = 0; i < PANT.length; i++) h += '<button class="gris" data-ir="' + PANT[i][1] + '">' + PANT[i][0] + '</button>';
+  h += '</div><div class="fila"><button class="gris" data-a="ctrl">Ver botones de la pantalla</button><button class="gris" data-a="volver">Volver al chat de IA</button></div>' +
+       '<div id="vista"></div><div class="fila"><button class="gris" data-a="chat">Cerrar ajustes</button></div>';
+  verPanel(h);
   api("/destino").then(function(d){ $("destino").value = d.destino || ""; }).catch(function(){});
 };
+function verPantalla() {
+  api("/pantalla-texto").then(function(d) {
+    $("vista").innerHTML = '<p class="sub">' + esc(d.titulo || "") + '</p><pre class="mini">' + esc(d.texto || "(vacio)") + '</pre>';
+  });
+}
+function verControles() {
+  $("vista").innerHTML = '<p class="sub">leyendo botones...</p>';
+  api("/controles").then(function(d) {
+    if (d.error || d.ocupado) { $("vista").innerHTML = '<p class="sub">⚠ ' + esc(d.error || "ocupado") + '</p>'; return; }
+    var h = '<p class="sub">' + esc(d.titulo || "") + ' — pulsa cualquiera:</p>', c = d.controles || [];
+    for (var i = 0; i < c.length; i++) h += '<button class="opt" data-i="' + c[i].i + '">' + esc(c[i].t) + '</button>';
+    if (!c.length) h += '<p class="sub">no encontre botones visibles</p>';
+    $("vista").innerHTML = h;
+  });
+}
+
+/* ---------- clicks dentro de los paneles ---------- */
+panel.addEventListener("click", function(ev) {
+  var t = ev.target;
+  if (t.tagName !== "BUTTON") return;
+  var m = t.getAttribute("data-m"), adj = t.getAttribute("data-del") , del = t.getAttribute("data-del");
+  if (m) {
+    t.textContent = "cambiando...";
+    api("/modelo", {method:"POST", body:m}).then(function(r) {
+      verChat();
+      add("estado", r.error ? ("⚠ " + r.error) : ("IA cambiada a " + r.modelo + " ✓"));
+    });
+    return;
+  }
+  if (t.getAttribute("data-adj")) {
+    var nombre = t.getAttribute("data-adj");
+    t.textContent = "adjuntando...";
+    api("/adjuntar", {method:"POST", body:nombre}).then(function(r) {
+      verChat();
+      add("estado", r.error ? ("⚠ " + r.error) : ("📎 " + nombre + " adjuntado (" + r.via + ") — ahora escribe tu mensaje"));
+    });
+    return;
+  }
+  if (del) { api("/borrar-archivo", {method:"POST", body:del}).then(listaArchivos); return; }
+  var ir = t.getAttribute("data-ir");
+  if (ir) {
+    $("vista").innerHTML = '<p class="sub">abriendo... (unos segundos)</p>';
+    api("/ir", {method:"POST", body:"https://www.notion.so/" + ir}).then(function() {
+      setTimeout(verPantalla, 4000);
+    });
+    return;
+  }
+  var idx = t.getAttribute("data-i");
+  if (idx !== null) {
+    t.textContent = "pulsando...";
+    api("/clic?i=" + idx, {method:"POST"}).then(function(r) {
+      if (r.error || r.ocupado) { $("vista").innerHTML = '<p class="sub">⚠ ' + esc(r.error || "ocupado") + '</p>'; return; }
+      $("vista").innerHTML = '<p class="sub">' + esc(r.resultado) + '</p><pre class="mini">' + esc(r.texto || "") + '</pre>';
+      setTimeout(verControles, 1200);
+    });
+    return;
+  }
+  var a = t.getAttribute("data-a");
+  if (a === "chat") { verChat(); }
+  else if (a === "ctrl") { verControles(); }
+  else if (a === "volver") { api("/volver", {method:"POST"}); verChat(); add("estado", "volviendo al chat de IA..."); }
+  else if (a === "recargar") { api("/recargar"); add("estado", "recargando la pagina..."); verChat(); }
+  else if (a === "guardar") {
+    clave = $("clave").value.trim();
+    localStorage.setItem("nl_clave", clave);
+    var d = $("destino").value.trim();
+    (d ? api("/destino", {method:"POST", body:d}) : Promise.resolve({})).then(function(r) {
+      verChat();
+      add("estado", r && r.error ? ("⚠ " + r.error) : "guardado ✓");
+    });
+  }
+});
+
+/* ---------- 🪞 espejo ---------- */
 $("bespejo").onclick = function() {
+  panel.style.display = "none";
   espejoOn = !espejoOn;
   $("espejo").style.display = espejoOn ? "block" : "none";
   msgs.style.display = espejoOn ? "none" : "flex";
@@ -599,17 +1076,13 @@ function tickEspejo() {
   }).catch(function(){});
   setTimeout(tickEspejo, 4000);
 }
-$("bg").onclick = function() {
-  clave = $("clave").value.trim();
-  localStorage.setItem("nl_clave", clave);
-  var d = $("destino").value.trim();
-  var p = d ? api("/destino", {method:"POST", body:d}) : Promise.resolve();
-  p.then(function(r){ if (r && r.error) { add("estado", "⚠ " + r.error); } else { add("estado", "guardado ✓ — abriendo la pagina (1-2 min)..."); } });
-};
+
+/* ---------- enviar ---------- */
 function enviar() {
   var t = $("t").value.trim();
   if (!t) return;
   $("t").value = "";
+  verChat();
   add("yo", t);
   $("b").disabled = true;
   burbuja = null;
@@ -640,9 +1113,7 @@ function enviar() {
       }, 2500);
     })();
   }).catch(function(e) {
-    estado("");
-    add("ia", "⚠ error de red: " + e);
-    $("b").disabled = false;
+    estado(""); add("ia", "⚠ error de red: " + e); $("b").disabled = false;
   });
 }
 $("b").onclick = enviar;
@@ -662,6 +1133,7 @@ D=/headless/data
 pkill -f 'vigilante' 2>/dev/null || true
 pkill -f "$D/firefox/firefox" 2>/dev/null || true
 sleep 2
+mkdir -p "$D/subidas"
 if [ ! -s "$D/chat/clave.txt" ]; then
   head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$D/chat/clave.txt"
 fi
@@ -697,30 +1169,27 @@ INNER
   cat <<FIN
 
 ============================================================
- ✅ MODO LIGERO ACTIVO (v1.6 — arreglo de raiz)
+ ✅ MODO LIGERO ACTIVO (v1.7)
 ------------------------------------------------------------
  Abre en tu PC/telefono:  https://$RUTA/
- Clave (te la pide una vez, boton ⚙): $CLAVE
+ Clave (boton ⚙, se guarda sola): $CLAVE
 ------------------------------------------------------------
- QUE SE ARREGLO: los scripts que leen la pagina no llevaban
- "return", asi que TODO volvia vacio (espejo en blanco,
- cuadro de texto nunca detectado, candado ocupado).
-
- AHORA la mini-web muestra arriba el estado de la pagina:
-   ⏳ cargando Notion...   ✓ pagina lista
-   ⚠ pide iniciar sesion  ⚠ sin cuadro de chat
-
- Espera a ver "✓ pagina lista" (1-2 min) y escribe.
+ NUEVO en la mini-web:
+   🤖  Elegir IA  — lee el selector de modelo de Notion y
+       cambia al que elijas (GPT, Claude, etc.)
+   📎  Archivos   — subes desde el telefono (max 20 MB) y
+       lo adjunta al chat; luego escribes y envias
+   ⚙   Cuenta     — abre Cuenta / Notificaciones / Conexiones
+       / Espacio de Notion en texto y puedes pulsar sus
+       botones desde el movil
+   🪞  Espejo     — la pagina en texto, en vivo
 ------------------------------------------------------------
- Autodiagnostico en 1 golpe:
-   https://$RUTA/prueba?clave=$CLAVE
- Estado general:  https://$RUTA/salud
- Reabrir pagina:  https://$RUTA/recargar?clave=$CLAVE
+ Espera a ver "✓ pagina lista" arriba antes de escribir.
+ Autodiagnostico:  https://$RUTA/prueba?clave=$CLAVE
+ Estado general:   https://$RUTA/salud
 ------------------------------------------------------------
- Si "pide iniciar sesion": sh modo.sh pantalla → entra a
- Notion con email+codigo → sh modo.sh ligero
- Si sospechas bloqueo por automatizacion:
-   SIGILO=1 sh modo.sh ligero
+ Si dice "pide iniciar sesion": sh modo.sh pantalla → entra
+ con email+codigo → sh modo.sh ligero
 ============================================================
 FIN
   ;;
@@ -736,23 +1205,4 @@ pkill -f 'marionette' 2>/dev/null || true
 sleep 2
 W=$(echo "$FF_RES" | cut -dx -f1)
 H=$(echo "$FF_RES" | cut -dx -f2)
-DISPLAY=:1 nohup "$D/firefox/firefox" --width "$W" --height "$H" --profile "$D/ff-notion" "$FF_URL" >/dev/null 2>&1 &
-nohup sh -c 'D="$HOME/data"; while true; do if ! pgrep -f "firefo[x]/firefox" >/dev/null 2>&1; then W=$(echo "$FF_RES" | cut -dx -f1); H=$(echo "$FF_RES" | cut -dx -f2); DISPLAY=:1 "$D/firefox/firefox" --width "$W" --height "$H" --profile "$D/ff-notion" "$FF_URL" >/dev/null 2>&1 & fi; sleep 15; done' >/dev/null 2>&1 &
-echo "   [OK] escritorio VNC + vigilante activos otra vez"
-INNER
-  RUTA=$(oc get route "$APP" -o jsonpath='{.spec.host}')
-  echo
-  echo " ✅ MODO PANTALLA ACTIVO — tu URL de siempre:"
-  echo "    https://$RUTA/?password=<tu-clave-VNC>"
-  echo
-  ;;
-
-# ================== ESTADO ==================
-estado|*)
-  echo "== procesos en el pod =="
-  oc exec -i "$POD" -- sh -c 'ps aux | grep -E "firefox|server.py" | grep -v grep || echo "   (nada de eso corriendo)"' 2>/dev/null || true
-  echo
-  echo "== rutas =="
-  oc get route 2>/dev/null || true
-  ;;
-esac
+DIS
