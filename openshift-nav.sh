@@ -1,14 +1,15 @@
 #!/bin/sh
 # ============================================================
 #  openshift-nav.sh — Navegador remoto ligero en OpenShift Sandbox
-#  v2.6: + los ÍCONOS del escritorio (menú y barra de IceWM)
-#        ahora lanzan el Firefox NUEVO — ya no el viejo de 2022
-#  1 proceso real · techo RAM 3Gi · auto-revive · 1024x600x16
+#  v2.7: + más headroom para chats pesados de Notion
+#        (RAM 3Gi → 5Gi, CPU 1 → 2 núcleos)
+#  1 proceso real · auto-revive · 1024x600x16 · iconos nuevos
 #  Idempotente. Ejecutar en la TERMINAL WEB de OpenShift (icono >_)
 #
 #  Uso:  sh openshift-nav.sh
 #        VNC_PASSWORD=miclave sh openshift-nav.sh
 #        RES=1280x720 sh openshift-nav.sh
+#        LIM_MEM=6Gi LIM_CPU=2 sh openshift-nav.sh   (más aún)
 # ============================================================
 set -eu
 
@@ -18,7 +19,7 @@ VNC_PASSWORD="${VNC_PASSWORD:-notion2026}"
 RES="${RES:-1024x600}"
 DEPTH="${DEPTH:-16}"
 REQ_CPU="${REQ_CPU:-250m}"; REQ_MEM="${REQ_MEM:-512Mi}"
-LIM_CPU="${LIM_CPU:-1}";    LIM_MEM="${LIM_MEM:-3Gi}"
+LIM_CPU="${LIM_CPU:-2}";    LIM_MEM="${LIM_MEM:-5Gi}"
 FF_URL="https://www.""notion.so"
 
 log(){  printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
@@ -28,7 +29,7 @@ err(){  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; }
 command -v oc >/dev/null 2>&1 || { err "No existe 'oc' aqui. Ejecuta esto en la terminal web de OpenShift (icono >_)."; exit 1; }
 PROJ=$(oc project -q)
 log "Proyecto: $PROJ | App: $APP"
-log "Imagen: $IMG | Video: $RES x $DEPTH bits | Techo RAM: $LIM_MEM"
+log "Imagen: $IMG | Video: $RES x $DEPTH bits | Limites: $LIM_CPU CPU / $LIM_MEM RAM"
 
 # ---------- 1. Limpieza idempotente ----------
 log "Limpiando restos anteriores de $APP (si existen)..."
@@ -142,7 +143,7 @@ ROUTE=$(oc get route "$APP" -o jsonpath='{.spec.host}')
 cat <<FIN
 
 ============================================================
- ✅ $APP OPTIMIZADO Y LISTO (v2.6)
+ ✅ $APP OPTIMIZADO Y LISTO (v2.7)
 ------------------------------------------------------------
  URL:        https://$ROUTE/?password=$VNC_PASSWORD
  Contraseña: $VNC_PASSWORD
@@ -152,15 +153,14 @@ cat <<FIN
  AJUSTES APLICADOS
  · Escritorio IceWM · Pantalla virtual $RES x $DEPTH bits
  · Firefox: 1 proceso real, sin cache RAM, sin autoplay
- · Limites: $REQ_MEM min / $LIM_MEM max RAM
+ · Limites: $LIM_CPU CPU / $LIM_MEM RAM (espacio para chat pesado)
  · Auto-revive: si cierras Firefox, se REABRE SOLO en ~15 s
- · Los ICONOS del escritorio ahora abren el Firefox NUEVO
+ · Los ICONOS del escritorio abren el Firefox NUEVO
  · Descargas fijadas en /headless/Downloads
 ------------------------------------------------------------
  SI CIERRAS FIREFOX:
  · No toques nada: el vigilante lo reabre solo en ~15 s.
  · O usa el menu/botón "Firefox NUEVO" del escritorio.
- · El icono viejo ya no engaña: tambien apunta al nuevo.
 ------------------------------------------------------------
  SI EL POD SE REINICIA: vuelve a ejecutar  sh openshift-nav.sh
  (ojo: se borran descargas y el login — sácalos antes con
