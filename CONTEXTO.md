@@ -4,7 +4,7 @@
 ## Instrucciones para el chat nuevo (importantes)
 
 1. **NUNCA des bloques grandes de código para pegar en la terminal.** El pegado de texto largo falla (caracteres invisibles U+200B y el chat corrompe el código: asteriscos→cursivas, `_` desaparecen, nombres→links falsos). **El método**: edita/sube los archivos de este repo con la conexión GitHub del usuario y dale UN comando de una línea con `curl -fsSL <raw-url> -o x.sh && sh x.sh`.
-2. El usuario opera desde la **terminal web de OpenShift** (ícono `>_` en la consola). Ahí existe `oc` y `curl`, NO existe `sudo` ni `wget`, y no hay root.
+2. El usuario opera desde la **terminal web de OpenShift** (ícono `>_` en la consola). Ahí existe `oc` y `curl`, NO existe `sudo` ni `wget`, y no hay root. (En GitHub Codespaces SÍ hay `sudo` y `docker`.)
 3. La detección de pods debe ser **por prefijo de nombre**, no por etiquetas (las etiquetas varían): `oc get pods --no-headers | awk '$1 ~ ("^" app "-") && $3=="Running" {print $1; exit}'`.
 4. Antes de dar comandos destructivos o redespliegues, recuérdale que **las descargas y el login viven en el volumen persistente** (`nav1-data`), pero el resto del pod se borra.
 5. Todo comando que se le da al usuario ya está probado en este entorno. Si algo falla, pedir la salida de `diagnostico.sh` primero, no adivinar.
@@ -19,6 +19,7 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 - El usuario escribió un mensaje a Notion AI **desde dentro del navegador remoto** — prueba final superada.
 - Persistencia implementada con PVC: login y descargas sobreviven reinicios.
 - El usuario ya fue bloqueado una vez por Google (ver regla de oro abajo).
+- **Nuevo (21 ago 2026):** respaldo en **GitHub Codespaces** listo — ver sección abajo.
 
 ## Arquitectura actual
 
@@ -43,8 +44,17 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 | `diagnostico.sh` | 🔍 Estado completo (pods, consumo, volumen, navegadores, procesos, RAM) | `curl -fsSL https://raw.githubusercontent.com/hunterhunters371-prog/navegador-remoto/main/diagnostico.sh -o d.sh && sh d.sh` |
 | `descargar.sh` | 📥 Lista archivos del pod; los extrae vía servicios externos (0x0.st/transfer.sh/file.io — suelen estar BLOQUEADOS por el firewall del sandbox) | `... /descargar.sh -o d2.sh && sh d2.sh` |
 | `publicar.sh` | 🔗 Descarga directa: expone el archivo en la propia URL del noVNC (el método que SÍ funciona en el sandbox) | `... /publicar.sh -o p.sh && sh p.sh "<archivo>"` |
+| `codespaces-nav.sh` | 🐙 Firefox web (jlesage/firefox, puerto 5800) en **GitHub Codespaces** | `curl -fsSL https://raw.githubusercontent.com/hunterhunters371-prog/navegador-remoto/main/codespaces-nav.sh -o cs.sh && sh cs.sh` |
 | `navegador-remoto.sh` | Stack completo para una **VM real con root** (Alpine/Debian, x86_64/ARM64): Xvfb+Chromium+x11vnc+noVNC | para cuando tenga VPS |
 | `openshift/Dockerfile` | Imagen propia con Firefox horneado (builds corren como root en el sandbox) | nivel 2, opcional |
+
+## GitHub Codespaces (respaldo por horas, sin tarjeta) — agregado 21 ago 2026
+
+- **Qué es**: respaldo del navegador remoto usando la cuota gratis de Codespaces (cuenta GitHub del usuario, sin tarjeta): **120 horas-núcleo/mes** = 60 h en máquina 2-core (30 h si elige 4-core) + 15 GB de disco. NO es 24/7: el codespace se apaga solo a los ~30 min sin uso.
+- **Cómo se usa**: crear el codespace desde el repo (botón Code → Codespaces → «Create codespace on main», imagen por defecto = trae docker) → terminal → correr `codespaces-nav.sh` (comando en la tabla de arriba) → pestaña **PUERTOS/PORTS** → abrir puerto **5800** (ícono de globo).
+- **Stack**: contenedor `jlesage/firefox` (web UI en 5800), volumen docker `ff-perfil` montado en `/config` → el login de Notion sobrevive apagados del codespace. Se borra TODO solo si se elimina el codespace.
+- El puerto reenviado es PRIVADO (solo el usuario logueado en GitHub lo ve). No hacerlo público sin poner contraseña.
+- Regla de oro igual que en el sandbox: login de Notion = **email + código**, NUNCA Google.
 
 ## Reglas aprendidas a las malas (no repetir)
 
@@ -59,10 +69,11 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 
 - **Recuperación de la cuenta de Google**: en curso desde la PC del usuario (accounts.google.com/signin/recovery). No reintentar logins desde el navegador remoto.
 - **Archivos RobloxAgentBridge (.rbxmx)**: estaban en `/headless/Descargas/` del pod viejo; si el pod fue redesplegado a v2.8, revisar `/headless/data/Downloads/` (volumen persistente) — extraerlos con `publicar.sh`. (Proyecto aparte: plugin de Roblox Studio que conecta con agentes.)
-- **VPS real (VPSWala)**: pedida pero sus 500 MB de disco NO alcanzan para un navegador moderno (~700 MB mínimo con Alpine). Si llega otra VPS con más disco → usar `navegador-remoto.sh`.
+- **VPS real (VPSWala)**: pedida pero sus 500 MB de disco NO alcanzan para un navegador moderno (~700 MB mínimo con Alpine). Si llega otra VPS con más disco → usar `navegador-remoto.sh`. NOTA (21 ago 2026): Oracle Cloud Always Free daba 4 OCPU/24 GB pero el 15-jun-2026 lo recortó a 2 OCPU/12 GB y exige tarjeta → descartado por ahora (el usuario no quiere dar tarjeta).
+- **Multi-instancia (investigado 21 ago 2026)**: NO hace falta otra cuenta — en la misma cuenta/namespace caben ~2-3 instancias (`APP=nav2 sh os.sh`). Crear una segunda cuenta de Red Hat viola sus términos (prohíben múltiples cuentas para eludir límites) y pide otro SMS de teléfono → descartado.
+- **Otras plataformas gratis sin tarjeta (investigado 21 ago 2026)**: ClawCloud Run ($5/mes cuando el GitHub cumpla 180 días, ~feb-2027) es el único 24/7 viable futuro. Google Cloud Shell (50 h/semana) y Codespaces (60 h/mes) = respaldos por horas. Zeabur/Koyeb/Render/Back4app duermen o tienen ≤512 MB RAM → no sirven. Railway = $5 únicos. Ojo con sitios de «VPS gratis sin tarjeta»: casi todos son estafa.
 - **ClawCloud Run** (run.claw.cloud): plan de respaldo 24/7 ($5/mes de crédito gratis). OJO: su regla exige cuenta GitHub de 180+ días para el crédito recurrente; la del usuario se creó el 16-ago-2026 → elegible ~mediados de feb-2027. Con Gmail dan $5 iniciales únicos.
 - **Cloud Shell** (shell.cloud.google.com): alternativa estable; el contenedor docker `jlesage/firefox` quedó creado allí (`docker start navegador` → Web Preview puerto 8080). Efímero fuera de $HOME.
-- **Multi-instancia**: la idea original era varias instancias (nav2, nav3...). Con la cuota de 14 GB caben ~2-3 con el perfil actual. Misma receta, `APP=nav2 sh os.sh`.
 - **Renovación del sandbox**: cada 30 días desde la consola de Red Hat Developer.
 
 ## Cómo continuar
