@@ -1,14 +1,13 @@
 #!/bin/sh
 # ============================================================
 #  openshift-nav.sh — Navegador remoto ligero en OpenShift Sandbox
-#  v2.2: IceWM + Firefox ACTUAL en VENTANA ÚNICA a tamaño completo
-#  (sin kiosko restrictivo: login y navegación funcionan normal)
-#  Detección del pod por nombre. Idempotente.
-#  Ejecutar en la TERMINAL WEB de OpenShift (icono >_)
+#  v2.3: + techo de RAM 3Gi (chats pesados de Notion)
+#        + auto-revive: si Firefox cae (OOM), se relanza solo
+#  Idempotente. Ejecutar en la TERMINAL WEB de OpenShift (icono >_)
 #
 #  Uso:  sh openshift-nav.sh
 #        VNC_PASSWORD=miclave sh openshift-nav.sh
-#        RES=1280x720 DEPTH=16 sh openshift-nav.sh
+#        RES=1280x720 sh openshift-nav.sh
 # ============================================================
 set -eu
 
@@ -18,7 +17,7 @@ VNC_PASSWORD="${VNC_PASSWORD:-notion2026}"
 RES="${RES:-1024x600}"
 DEPTH="${DEPTH:-16}"
 REQ_CPU="${REQ_CPU:-250m}"; REQ_MEM="${REQ_MEM:-512Mi}"
-LIM_CPU="${LIM_CPU:-1}";    LIM_MEM="${LIM_MEM:-2Gi}"
+LIM_CPU="${LIM_CPU:-1}";    LIM_MEM="${LIM_MEM:-3Gi}"
 FF_URL="https://www.""notion.so"
 
 log(){  printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
@@ -28,7 +27,7 @@ err(){  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; }
 command -v oc >/dev/null 2>&1 || { err "No existe 'oc' aqui. Ejecuta esto en la terminal web de OpenShift (icono >_)."; exit 1; }
 PROJ=$(oc project -q)
 log "Proyecto: $PROJ | App: $APP"
-log "Imagen: $IMG | Video: $RES x $DEPTH bits"
+log "Imagen: $IMG | Video: $RES x $DEPTH bits | Techo RAM: $LIM_MEM"
 
 # ---------- 1. Limpieza idempotente ----------
 log "Limpiando restos anteriores de $APP (si existen)..."
@@ -42,7 +41,7 @@ oc new-app "$IMG" --name "$APP" \
   -e VNC_RESOLUTION="$RES" \
   -e VNC_COL_DEPTH="$DEPTH"
 
-# ---------- 3. Recursos (anti-OOM) ----------
+# ---------- 3. Recursos (anti-OOM, con headroom para chats pesados) ----------
 log "Limites: $REQ_CPU/$REQ_MEM (min) -> $LIM_CPU/$LIM_MEM (max)"
 oc set resources deployment "$APP" --requests=cpu=$REQ_CPU,memory=$REQ_MEM --limits=cpu=$LIM_CPU,memory=$LIM_MEM
 
@@ -59,8 +58,8 @@ POD=$(oc get pods --no-headers 2>/dev/null | awk -v app="$APP" '$1 ~ ("^" app "-
 [ -n "$POD" ] || { err "No encontré pod Running de $APP. Pégame la salida de: oc get pods"; exit 1; }
 log "Pod activo: $POD"
 
-# ---------- 6. Dentro del pod: matar viejo, instalar nuevo, VERIFICAR ----------
-log "Instalando Firefox actual + perfil ligero dentro del pod..."
+# ---------- 6. Dentro del pod: matar viejo, instalar nuevo, VERIFICAR, VIGILAR ----------
+log "Instalando Firefox actual + perfil ligero + auto-revive..."
 oc exec -i "$POD" -- env FF_RES="$RES" FF_URL="$FF_URL" sh -s <<'INNER'
 set -e
 cd "$HOME"
@@ -116,6 +115,10 @@ else
 fi
 echo "==> procesos de navegador activos ahora:"
 ps aux | grep -iE 'firefox|chrom' | grep -v grep || echo "   (ninguno)"
+
+echo "==> activando auto-revive (vigilante cada 15 s)..."
+nohup sh -c 'while true; do if ! pgrep -f "firefo[x]/firefox" >/dev/null 2>&1; then W=$(echo "$FF_RES" | cut -dx -f1); H=$(echo "$FF_RES" | cut -dx -f2); DISPLAY=:1 "$HOME/firefox/firefox" --width "$W" --height "$H" --profile "$HOME/ff-notion" "$FF_URL" >/dev/null 2>&1 & fi; sleep 15; done' >/dev/null 2>&1 &
+echo "   [OK] vigilante activo: si Firefox cae, se relanza solo"
 INNER
 
 # ---------- 7. Resultado ----------
@@ -123,7 +126,7 @@ ROUTE=$(oc get route "$APP" -o jsonpath='{.spec.host}')
 cat <<FIN
 
 ============================================================
- ✅ $APP OPTIMIZADO Y LISTO
+ ✅ $APP OPTIMIZADO Y LISTO (v2.3)
 ------------------------------------------------------------
  URL:        https://$ROUTE/?password=$VNC_PASSWORD
  Contraseña: $VNC_PASSWORD
@@ -131,18 +134,21 @@ cat <<FIN
              1 proceso, login y navegacion NORMALES)
 ------------------------------------------------------------
  AJUSTES DE CONSUMO APLICADOS
- · Escritorio IceWM (el mas liviano de la familia probada aqui)
- · Pantalla virtual $RES x $DEPTH bits
+ · Escritorio IceWM · Pantalla virtual $RES x $DEPTH bits
  · Firefox: 1 proceso, sin cache RAM, sin historial en memoria,
    sin animaciones ni autoplay
- · Limites: $REQ_MEM min / $LIM_MEM max RAM (anti-OOM)
+ · Limites: $REQ_MEM min / $LIM_MEM max RAM
+------------------------------------------------------------
+ NUEVO EN ESTA VERSION
+ · Techo de RAM subido a $LIM_MEM: espacio para chats pesados
+ · Auto-revive: si Firefox cae por falta de RAM, se relanza
+   solo en ~15 segundos (recarga la pagina del navegador si
+   se congela y espera un momento)
 ------------------------------------------------------------
  COMO ENTRAR A NOTION:
  · La ventana abre directo en Notion.
- · Login recomendado: con tu email te mandan un codigo
-   (todo pasa en la misma ventana, sin popups).
- · El boton de Google abre popup: ahora SÍ funciona,
-   porque ya no es kiosko.
+ · Login con email+codigo: todo en la misma ventana.
+ · El popup de Google ya funciona (no es kiosko).
 ------------------------------------------------------------
  REGLA VISUAL:
  · La ventana que abre SOLA con Notion = Firefox NUEVO ✓
