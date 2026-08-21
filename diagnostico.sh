@@ -20,7 +20,8 @@ echo
 echo "== RUTA =="
 oc get route "$APP" 2>&1 || echo "(sin ruta)"
 
-POD=$(oc get pods -l app=$APP --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+# Detección robusta: por prefijo de nombre (las etiquetas varían según cómo se creó)
+POD=$(oc get pods --no-headers 2>/dev/null | awk -v app="$APP" '$1 ~ ("^" app "-") && $3=="Running" {print $1; exit}')
 if [ -z "$POD" ]; then
   echo
   echo "[x] No hay pod Running de $APP — nada que revisar dentro."

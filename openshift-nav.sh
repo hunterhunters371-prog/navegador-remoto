@@ -1,12 +1,13 @@
 #!/bin/sh
 # ============================================================
 #  openshift-nav.sh — Navegador remoto ligero en OpenShift Sandbox
-#  v2: IceWM + Firefox ACTUAL en kiosko + AUTO-VERIFICACIÓN
-#  de qué navegador está corriendo (adiós al Firefox viejo)
+#  v2.1: IceWM + Firefox ACTUAL en kiosko + AUTO-VERIFICACIÓN
+#  Detección del pod por prefijo de nombre (robusta).
 #  Idempotente. Ejecutar en la TERMINAL WEB de OpenShift (icono >_)
 #
 #  Uso:  sh openshift-nav.sh
 #        VNC_PASSWORD=miclave sh openshift-nav.sh
+#        RES=1024x600 DEPTH=16 sh openshift-nav.sh   (menos video)
 # ============================================================
 set -eu
 
@@ -26,7 +27,7 @@ err(){  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; }
 command -v oc >/dev/null 2>&1 || { err "No existe 'oc' aqui. Ejecuta esto en la terminal web de OpenShift (icono >_)."; exit 1; }
 PROJ=$(oc project -q)
 log "Proyecto: $PROJ | App: $APP"
-log "Imagen: $IMG"
+log "Imagen: $IMG | Video: $RES x $DEPTH bits"
 
 # ---------- 1. Limpieza idempotente ----------
 log "Limpiando restos anteriores de $APP (si existen)..."
@@ -52,7 +53,9 @@ oc create route edge "$APP" --service "$APP" --port 6901 --insecure-policy Redir
 log "Esperando pod Running (descarga ~1.5GB, 3-6 min)..."
 oc rollout status "deployment/$APP" --timeout=6m
 
-POD=$(oc get pods -l app=$APP --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+# Detección robusta: por prefijo de nombre
+POD=$(oc get pods --no-headers 2>/dev/null | awk -v app="$APP" '$1 ~ ("^" app "-") && $3=="Running" {print $1; exit}')
+[ -n "$POD" ] || { err "No encontré pod Running de $APP. Pégame la salida de: oc get pods"; exit 1; }
 log "Pod activo: $POD"
 
 # ---------- 6. Dentro del pod: matar viejo, instalar nuevo, VERIFICAR ----------
