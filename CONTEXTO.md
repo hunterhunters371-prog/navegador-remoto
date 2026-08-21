@@ -21,6 +21,7 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 - El usuario ya fue bloqueado una vez por Google (ver regla de oro abajo).
 - **Nuevo (21 ago 2026):** respaldo en **GitHub Codespaces** listo — ver sección abajo.
 - **Nuevo (21 ago 2026, v2.9):** paquete de rendimiento en `openshift-nav.sh` — 19 prefs nuevos de Firefox (render por software directo, sin telemetría/updates/prefetch, caché de disco topado a 50 MB, sesión escribe 1/min al volumen, pestañas se descargan con poca RAM, accesibilidad off) + URL rápida `vnc_lite.html` en el resumen. En `codespaces-nav.sh` v1.1: `--shm-size=512m` (evita caídas de pestañas en docker).
+- **Nuevo (21 ago 2026, `modo.sh` v1.0):** interruptor pantalla↔**texto ligero** (experimental) — ver sección «Modo ligero» abajo. Motivo: el lag venía del VIDEO del VNC, no de la RAM.
 
 ## Arquitectura actual
 
@@ -31,7 +32,7 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 - **Contraseña VNC**: la por defecto de `openshift-nav.sh` (cambiable con `VNC_PASSWORD=`)
 - **Recursos**: requests 250m/512Mi — límites 2 CPU / 5Gi RAM (cuota total del sandbox: ~14 GB RAM, 3 núcleos, 40 GB disco; se renueva cada 30 días gratis)
 - **Video**: pantalla virtual 1024x600 x 16 bits (`VNC_RESOLUTION`/`VNC_COL_DEPTH`)
-- **Volumen persistente**: PVC `nav1-data` (2Gi) montado en `/headless/data` → ahí viven: `firefox/` (binario portable), `ff-notion/` (perfil con cookies/login), `Downloads/` (descargas). Sobrevive a redespliegues y a `cerrar.sh borrar`. Solo se borra con `oc delete pvc nav1-data` o `sh c.sh nuclear`.
+- **Volumen persistente**: PVC `nav1-data` (2Gi) montado en `/headless/data` → ahí viven: `firefox/` (binario portable), `ff-notion/` (perfil con cookies/login), `Downloads/` (descargas), `chat/` (modo ligero: server.py, chat.html, clave.txt, destino.txt). Sobrevive a redespliegues y a `cerrar.sh borrar`. Solo se borra con `oc delete pvc nav1-data` o `sh c.sh nuclear`.
 - **Firefox**: portable de Mozilla en `/headless/data/firefox/firefox`, perfil `/headless/data/ff-notion` con 1 proceso de contenido (Fission apagado), sin caché RAM, sin autoplay; ventana única al tamaño de la pantalla (NO kiosko — el kiosko bloqueaba el login y la navegación). Desde v2.9: render por software, telemetría/updates/prefetch apagados.
 - **Auto-revive**: vigilante cada 15 s relanza Firefox si cae. Los íconos del escritorio (IceWM menu/toolbar) apuntan al Firefox nuevo.
 - **Red**: VNC crudo solo localhost; la puerta es el 6901 web con contraseña.
@@ -46,6 +47,7 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 | `descargar.sh` | 📥 Lista archivos del pod; los extrae vía servicios externos (0x0.st/transfer.sh/file.io — suelen estar BLOQUEADOS por el firewall del sandbox) | `... /descargar.sh -o d2.sh && sh d2.sh` |
 | `publicar.sh` | 🔗 Descarga directa: expone el archivo en la propia URL del noVNC (el método que SÍ funciona en el sandbox) | `... /publicar.sh -o p.sh && sh p.sh "<archivo>"` |
 | `codespaces-nav.sh` | 🐙 Firefox web (jlesage/firefox, puerto 5800) en **GitHub Codespaces** | `curl -fsSL https://raw.githubusercontent.com/hunterhunters371-prog/navegador-remoto/main/codespaces-nav.sh -o cs.sh && sh cs.sh` |
+| `modo.sh` | 🔀 Interruptor: pantalla (VNC) ↔ **texto ligero** (mini chat web con tu Notion AI) | `curl -fsSL https://raw.githubusercontent.com/hunterhunters371-prog/navegador-remoto/main/modo.sh -o m.sh && sh m.sh ligero` |
 | `navegador-remoto.sh` | Stack completo para una **VM real con root** (Alpine/Debian, x86_64/ARM64): Xvfb+Chromium+x11vnc+noVNC | para cuando tenga VPS |
 | `openshift/Dockerfile` | Imagen propia con Firefox horneado (builds corren como root en el sandbox) | nivel 2, opcional |
 
@@ -56,6 +58,21 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 - **Stack**: contenedor `jlesage/firefox` (web UI en 5800, `--shm-size=512m` desde v1.1), volumen docker `ff-perfil` montado en `/config` → el login de Notion sobrevive apagados del codespace. Se borra TODO solo si se elimina el codespace.
 - El puerto reenviado es PRIVADO (solo el usuario logueado en GitHub lo ve). No hacerlo público sin poner contraseña.
 - Regla de oro igual que en el sandbox: login de Notion = **email + código**, NUNCA Google.
+- **Probado (21 ago 2026)**: el usuario lo levantó en el codespace `opulent-zebra-jr4x7x6vvw7rhp9q5` — funcionó tras aclarar que `cs.sh` va en Codespaces y `os.sh` en OpenShift. Bug de URL impresa (llaves dobles) corregido en v1.2.
+
+## Modo ligero de texto (experimental, v1.0) — agregado 21 ago 2026
+
+- **Por qué existe**: el «lag» que molesta al usuario NO es la RAM — es el **video** del VNC (stream continuo por una ruta de datacenter compartida). Una IA no necesita pantalla: basta hablar con la página y mover texto.
+- **Qué hace `modo.sh ligero`** (interruptor sobre el MISMO pod de nav1):
+  1. Crea service+ruta `$APP-chat` (puerto 6902, edge/Redirect) reutilizando el selector del service original.
+  2. Instala en el volumen (`/headless/data/chat/`): `server.py` (puente Python solo-stdlib) y `chat.html` (mini UI de ~8 KB).
+  3. Mata el vigilante y el Firefox de pantalla; arranca **Firefox headless** con `--marionette` (protocolo nativo de control de Firefox, puerto 2828, sin descargar nada) usando el MISMO perfil `ff-notion` (login intacto).
+  4. Levanta `server.py` en 6902: sirve el chat; `POST /preguntar` escribe en el composer de Notion AI (truco `execCommand("insertText")` + Enter sintético) y espera la respuesta leyendo `innerText` de `main` hasta que queda estable y no hay botón Stop/Detener. Patrón async (job + `/estado`) para esquivar el timeout ~30 s de la ruta HAProxy.
+- **Clave**: se genera una vez en `/headless/data/chat/clave.txt`, la imprime modo.sh; la mini-web la guarda en localStorage.
+- **Destino por defecto**: https://www.notion.so/chat — cambiable en el ⚙ de la mini-web o en `destino.txt`.
+- **Volver**: `sh modo.sh pantalla` mata server.py + headless y relanza el Firefox gráfico + vigilante (mismo código que os.sh).
+- **Limitaciones v1**: UNA pregunta a la vez (lock); heurísticas genéricas (contenteditable + texto estable + botón Stop/Detener) — si Notion cambia su interfaz hay que ajustar `server.py`; el escritorio VNC (Xvfb/IceWM) sigue corriendo idle en modo ligero; pantalla y ligero NUNCA a la vez (el perfil se bloquearía).
+- **Si falla**: `sh modo.sh pantalla` restaura lo de siempre; pedir salida completa del comando y ajustar selectores/heurísticas.
 
 ## Reglas aprendidas a las malas (no repetir)
 
@@ -65,6 +82,7 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 4. El pod se reinicia y la terminal web se desconecta a veces (router compartido) — es normal; el pod sigue vivo.
 5. Notion carga el chat completo en RAM al abrirlo: entrar primero a una página ligera; los chats gigantes (como el que generó este proyecto) se abren solo cuando se necesitan.
 6. `oc adm top pods` = consumo real. El `free` dentro del pod muestra la RAM del NODO compartido (31 GB), no la cuota — ignorar ese número.
+7. 🚫 El lag de la interfaz NO se arregla con más RAM: el cuello de botella es el stream de video del VNC. Para eso existe el modo ligero (`modo.sh`).
 
 ## Pendientes / siguiente trabajo
 
