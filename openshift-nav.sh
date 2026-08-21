@@ -1,8 +1,9 @@
 #!/bin/sh
 # ============================================================
 #  openshift-nav.sh — Navegador remoto ligero en OpenShift Sandbox
-#  v2.3: + techo de RAM 3Gi (chats pesados de Notion)
-#        + auto-revive: si Firefox cae (OOM), se relanza solo
+#  v2.4: + fuerza 1 SOLO proceso de contenido en Firefox 154
+#        (apaga Fission + procesos pre-lanzados: -200/400 MB)
+#  Techo RAM 3Gi · auto-revive · ventana unica 1024x600x16
 #  Idempotente. Ejecutar en la TERMINAL WEB de OpenShift (icono >_)
 #
 #  Uso:  sh openshift-nav.sh
@@ -59,7 +60,7 @@ POD=$(oc get pods --no-headers 2>/dev/null | awk -v app="$APP" '$1 ~ ("^" app "-
 log "Pod activo: $POD"
 
 # ---------- 6. Dentro del pod: matar viejo, instalar nuevo, VERIFICAR, VIGILAR ----------
-log "Instalando Firefox actual + perfil ligero + auto-revive..."
+log "Instalando Firefox actual + perfil ultraligero (1 proceso real) + auto-revive..."
 oc exec -i "$POD" -- env FF_RES="$RES" FF_URL="$FF_URL" sh -s <<'INNER'
 set -e
 cd "$HOME"
@@ -83,6 +84,8 @@ fi
 mkdir -p ff-notion
 cat > ff-notion/user.js <<PREFS
 user_pref("dom.ipc.processCount", 1);
+user_pref("fission.autostart", false);
+user_pref("dom.ipc.processPrelaunch.enabled", false);
 user_pref("browser.cache.memory.enable", false);
 user_pref("browser.sessionhistory.max_total_viewers", 0);
 user_pref("media.autoplay.default", 5);
@@ -113,7 +116,7 @@ else
   echo "   [ERROR] el Firefox nuevo no esta corriendo. Salida cruda del intento:"
   DISPLAY=:1 "$HOME/firefox/firefox" --width "$W" --height "$H" --profile "$HOME/ff-notion" "$FF_URL" 2>&1 | head -15 || true
 fi
-echo "==> procesos de navegador activos ahora:"
+echo "==> procesos de navegador activos ahora (deberian ser POCOS):"
 ps aux | grep -iE 'firefox|chrom' | grep -v grep || echo "   (ninguno)"
 
 echo "==> activando auto-revive (vigilante cada 15 s)..."
@@ -126,24 +129,19 @@ ROUTE=$(oc get route "$APP" -o jsonpath='{.spec.host}')
 cat <<FIN
 
 ============================================================
- ✅ $APP OPTIMIZADO Y LISTO (v2.3)
+ ✅ $APP OPTIMIZADO Y LISTO (v2.4)
 ------------------------------------------------------------
  URL:        https://$ROUTE/?password=$VNC_PASSWORD
  Contraseña: $VNC_PASSWORD
  Pagina:     Notion — ventana unica $RES (Firefox ACTUAL,
-             1 proceso, login y navegacion NORMALES)
+             1 SOLO proceso de contenido, login normal)
 ------------------------------------------------------------
  AJUSTES DE CONSUMO APLICADOS
  · Escritorio IceWM · Pantalla virtual $RES x $DEPTH bits
- · Firefox: 1 proceso, sin cache RAM, sin historial en memoria,
-   sin animaciones ni autoplay
+ · Firefox: 1 proceso real (Fission apagado, sin pre-lanzados),
+   sin cache RAM, sin historial en memoria, sin autoplay
  · Limites: $REQ_MEM min / $LIM_MEM max RAM
-------------------------------------------------------------
- NUEVO EN ESTA VERSION
- · Techo de RAM subido a $LIM_MEM: espacio para chats pesados
- · Auto-revive: si Firefox cae por falta de RAM, se relanza
-   solo en ~15 segundos (recarga la pagina del navegador si
-   se congela y espera un momento)
+ · Auto-revive: si Firefox cae, se relanza solo en ~15 s
 ------------------------------------------------------------
  COMO ENTRAR A NOTION:
  · La ventana abre directo en Notion.
