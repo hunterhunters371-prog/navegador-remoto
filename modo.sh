@@ -1,11 +1,14 @@
 #!/bin/sh
 # ============================================================
 #  modo.sh — interruptor de nav1: PANTALLA (VNC) <-> LIGERO (texto)
-#  v1.4 EXPERIMENTAL
-#    · /salud ahora diagnostica SIN bloquearse: firefox vivo,
-#      marionette escuchando/ocupado/caido, destino en uso
-#    · /debug ya NUNCA se cuelga: si el headless esta ocupado
-#      responde de inmediato con el texto parcial
+#  v1.5 EXPERIMENTAL
+#    · cambiar el destino (⚙) ahora NAVEGA YA a la nueva pagina
+#      (antes no pasaba nada hasta la siguiente pregunta)
+#    · estado de pagina explicito (cargando/por-verificar/lista):
+#      el espejo responde "cargando" SIN tocar el headless mientras
+#      Notion termina de cargar (adios al ocupado permanente)
+#    · /salud y /debug reportan el estado de la pagina
+#  v1.4 · /salud con diagnostico sin bloqueo + /debug nunca se cuelga
 #  v1.3 · precarga Notion al arrancar + autovalida destino
 #  v1.2 · respuesta en vivo (texto parcial) + boton Espejo 🪞
 #  v1.1 · destino validado (solo URLs de Notion) + /debug
@@ -78,6 +81,7 @@ contador = [0]
 cont_lock = threading.Lock()
 m_lock = threading.Lock()   # Marionette NO es hilo-seguro: 1 pregunta a la vez
 vivo = {"texto": "", "job": None}   # texto parcial de la respuesta en curso
+pagina = {"estado": "iniciando", "desde": 0}   # cargando -> por-verificar -> lista
 _calentando = [False]
 
 # ---------------- Marionette minimo (solo stdlib) ----------------
@@ -171,11 +175,13 @@ def destino_actual():
             return d
     return DESTINO_DEFAULT
 
-def lanzar_calentar():
-    # precarga Notion en el headless sin bloquear al servidor
+def lanzar_calentar(forzar=False):
+    # navega al destino en segundo plano, sin bloquear al servidor
     if _calentando[0]:
         return
     _calentando[0] = True
+    pagina["estado"] = "cargando"
+    pagina["desde"] = time.time()
     def run():
         try:
             with m_lock:
@@ -185,11 +191,13 @@ def lanzar_calentar():
                     actual = js("location.href") or ""
                 except Exception:
                     actual = ""
-                if destino.split("?")[0] not in actual:
+                if forzar or destino.split("?")[0] not in actual:
                     js("location.href = " + json.dumps(destino))
+                    time.sleep(20)   # deja respirar la carga inicial de la SPA
         except Exception:
             pass
         finally:
+            pagina["estado"] = "por-verificar"
             _calentando[0] = False
     threading.Thread(target=run, daemon=True).start()
 
@@ -209,16 +217,20 @@ def asegurar_pagina():
     except Exception:
         actual = ""
     if destino.split("?")[0] not in actual:
+        pagina["estado"] = "cargando"
+        pagina["desde"] = time.time()
         js("location.href = " + json.dumps(destino))
         t0 = time.time()
         while time.time() - t0 < 120:
             time.sleep(3)
             try:
                 if js(JS_COMPOSER):
+                    pagina["estado"] = "lista"
                     return
             except Exception:
                 pass
         raise RuntimeError("la pagina no mostro el cuadro de texto a tiempo (login vencido o URL destino incorrecta)")
+    pagina["estado"] = "lista"
 
 JS_ENVIAR = """
 (() => {
@@ -322,7 +334,8 @@ class H(BaseHTTPRequestHandler):
             else:
                 m = "escuchando" if marionette_vivo() else "NO responde"
             self._json({"ok": True, "modo": "ligero", "firefox_headless": ff,
-                        "marionette": m, "destino": destino_actual()})
+                        "marionette": m, "destino": destino_actual(),
+                        "pagina": pagina["estado"]})
             return
         if path == "/" or path == "/chat.html":
             data = open(HTML, "rb").read()
@@ -345,6 +358,9 @@ class H(BaseHTTPRequestHandler):
             self._json(job)
             return
         if path == "/espejo":
+            if pagina["estado"] == "cargando":
+                self._json({"ocupado": False, "texto": "", "cargando": True})
+                return
             if m_lock.locked():
                 self._json({"ocupado": True, "texto": vivo.get("texto", ""), "cargando": not vivo.get("texto")})
                 return
@@ -353,9 +369,11 @@ class H(BaseHTTPRequestHandler):
                     info = leer()
                     txt = info.get("texto") or ""
                     if not txt.strip():
-                        lanzar_calentar()
+                        if time.time() - pagina["desde"] > 120:
+                            lanzar_calentar()
                         self._json({"ocupado": False, "texto": "", "cargando": True})
                         return
+                    pagina["estado"] = "lista"
                     self._json({"ocupado": False, "texto": txt[-4000:], "escribiendo": info.get("escribiendo", False)})
                 except Exception as e:
                     self._json({"ocupado": False, "texto": "", "error": str(e)})
@@ -366,6 +384,7 @@ class H(BaseHTTPRequestHandler):
         if path == "/debug":
             if m_lock.locked():
                 self._json({"ocupado": True, "parcial": vivo.get("texto", ""),
+                            "pagina": pagina["estado"],
                             "destino_configurado": destino_actual()})
                 return
             with m_lock:
@@ -378,6 +397,7 @@ class H(BaseHTTPRequestHandler):
                     }
                 except Exception as e:
                     info = {"error": str(e)}
+            info["pagina"] = pagina["estado"]
             info["destino_configurado"] = destino_actual()
             self._json(info)
             return
@@ -405,7 +425,8 @@ class H(BaseHTTPRequestHandler):
                 self._json({"error": "el destino debe ser una pagina de Notion (notion.so/...)", "destino": destino_actual()}, 400)
                 return
             open(DESTINO_FILE, "w").write(cuerpo + "\n")
-            self._json({"destino": cuerpo})
+            lanzar_calentar(forzar=True)   # navega YA a la nueva pagina
+            self._json({"destino": cuerpo, "navegando": True})
             return
         self._json({"error": "ruta desconocida"}, 404)
 
@@ -508,7 +529,7 @@ $("bg").onclick = function() {
   localStorage.setItem("nl_clave", clave);
   var d = $("destino").value.trim();
   var p = d ? api("/destino", {method:"POST", body:d}) : Promise.resolve();
-  p.then(function(r){ if (r && r.error) { add("estado", "⚠ " + r.error); } else { add("estado", "guardado ✓"); } });
+  p.then(function(r){ if (r && r.error) { add("estado", "⚠ " + r.error); } else { add("estado", "guardado ✓ — cargando la nueva pagina (1-2 min)..."); } });
 };
 function enviar() {
   var t = $("t").value.trim();
@@ -600,20 +621,22 @@ INNER
   cat <<FIN
 
 ============================================================
- ✅ MODO LIGERO ACTIVO (v1.4 experimental)
+ ✅ MODO LIGERO ACTIVO (v1.5 experimental)
 ------------------------------------------------------------
  Abre en tu PC/telefono:  https://$RUTA/
  Clave (te la pide una vez, boton ⚙): $CLAVE
 ------------------------------------------------------------
- · DIAGNOSTICO RAPIDO (no se cuelga): abre
-   https://$RUTA/salud
-   y comparte el JSON — dice si firefox vive y si el
-   canal de control (marionette) responde.
- · /debug?clave=$CLAVE ya nunca se cuelga tampoco.
- · El espejo tarda 1-2 min la primera vez (precarga).
+ · NUEVO: cambiar el destino (⚙) navega YA a la pagina nueva.
+ · NUEVO: el espejo dice "cargando" sin estorbar mientras
+   Notion termina de cargar.
+ · Diagnostico sin bloqueo:  https://$RUTA/salud
+   y  https://$RUTA/debug?clave=$CLAVE
+   (ambos reportan el estado de la pagina)
 ------------------------------------------------------------
- Si algo falla: vuelve a la normalidad con
-   sh modo.sh pantalla
+ OJO: el destino debe ser un CHAT de Notion AI (con cuadro
+ "Pregunta..."). Si es una pagina de documento normal, el
+ puente escribiria texto EN el documento.
+ Si algo falla: sh modo.sh pantalla
 ============================================================
 FIN
   ;;
