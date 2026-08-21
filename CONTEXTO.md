@@ -1,0 +1,70 @@
+# CONTEXTO DEL PROYECTO — Navegador remoto en OpenShift
+> Archivo de transferencia entre chats. Si eres un **chat nuevo de Notion AI** leyendo esto: aquí está todo el estado del proyecto. El usuario (Oven, Bogotá, habla español) continúa desde este punto. No le pidas repetir diagnósticos ya hechos.
+
+## Instrucciones para el chat nuevo (importantes)
+
+1. **NUNCA des bloques grandes de código para pegar en la terminal.** El pegado de texto largo falla (caracteres invisibles U+200B y el chat corrompe el código: asteriscos→cursivas, `_` desaparecen, nombres→links falsos). **El método**: edita/sube los archivos de este repo con la conexión GitHub del usuario y dale UN comando de una línea con `curl -fsSL <raw-url> -o x.sh && sh x.sh`.
+2. El usuario opera desde la **terminal web de OpenShift** (ícono `>_` en la consola). Ahí existe `oc` y `curl`, NO existe `sudo` ni `wget`, y no hay root.
+3. La detección de pods debe ser **por prefijo de nombre**, no por etiquetas (las etiquetas varían): `oc get pods --no-headers | awk '$1 ~ ("^" app "-") && $3=="Running" {print $1; exit}'`.
+4. Antes de dar comandos destructivos o redespliegues, recuérdale que **las descargas y el login viven en el volumen persistente** (`nav1-data`), pero el resto del pod se borra.
+5. Todo comando que se le da al usuario ya está probado en este entorno. Si algo falla, pedir la salida de `diagnostico.sh` primero, no adivinar.
+
+## Qué es esto
+
+Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados de Notion AI) desde cualquier navegador web, corriendo en **Red Hat Developer Sandbox** (OpenShift gratuito, sin tarjeta). El objetivo original incluía bajo consumo de RAM y sesión persistente.
+
+## Estado actual (21 ago 2026): ✅ FUNCIONANDO
+
+- Firefox actual (154.x, descargado de Mozilla) corriendo en el pod, Notion aceptado, login hecho.
+- El usuario escribió un mensaje a Notion AI **desde dentro del navegador remoto** — prueba final superada.
+- Persistencia implementada con PVC: login y descargas sobreviven reinicios.
+- El usuario ya fue bloqueado una vez por Google (ver regla de oro abajo).
+
+## Arquitectura actual
+
+- **Plataforma**: Red Hat Developer Sandbox, namespace `dayalert7-dev`, usuario `dayalert7`
+- **Consola**: https://console-openshift-console.apps.rm1.0a51.p1.openshiftapps.com
+- **App**: `nav1` (imagen `docker.io/consol/rocky-icewm-vnc` — Rocky Linux 9 + IceWM; contiene Firefox 102 ESR viejo que NO se usa)
+- **Ruta/URL**: https://nav1-dayalert7-dev.apps.rm1.0a51.p1.openshiftapps.com (edge/Redirect, puerto 6901; acceso con `?password=<VNC_PASSWORD>`)
+- **Contraseña VNC**: la por defecto de `openshift-nav.sh` (cambiable con `VNC_PASSWORD=`)
+- **Recursos**: requests 250m/512Mi — límites 2 CPU / 5Gi RAM (cuota total del sandbox: ~14 GB RAM, 3 núcleos, 40 GB disco; se renueva cada 30 días gratis)
+- **Video**: pantalla virtual 1024x600 x 16 bits (`VNC_RESOLUTION`/`VNC_COL_DEPTH`)
+- **Volumen persistente**: PVC `nav1-data` (2Gi) montado en `/headless/data` → ahí viven: `firefox/` (binario portable), `ff-notion/` (perfil con cookies/login), `Downloads/` (descargas). Sobrevive a redespliegues y a `cerrar.sh borrar`. Solo se borra con `oc delete pvc nav1-data` o `sh c.sh nuclear`.
+- **Firefox**: portable de Mozilla en `/headless/data/firefox/firefox`, perfil `/headless/data/ff-notion` con 1 proceso de contenido (Fission apagado), sin caché RAM, sin autoplay; ventana única al tamaño de la pantalla (NO kiosko — el kiosko bloqueaba el login y la navegación).
+- **Auto-revive**: vigilante cada 15 s relanza Firefox si cae. Los íconos del escritorio (IceWM menu/toolbar) apuntan al Firefox nuevo.
+- **Red**: VNC crudo solo localhost; la puerta es el 6901 web con contraseña.
+
+## Caja de herramientas (este repo, rama main)
+
+| Script | Qué hace | Comando |
+|---|---|---|
+| `openshift-nav.sh` | ▶️ Levantar/reparar TODO (idempotente) | `curl -fsSL https://raw.githubusercontent.com/hunterhunters371-prog/navegador-remoto/main/openshift-nav.sh -o os.sh && sh os.sh` |
+| `cerrar.sh` | ⏸️ Pausar (scale 0) / `borrar` / `nuclear` | `curl -fsSL https://raw.githubusercontent.com/hunterhunters371-prog/navegador-remoto/main/cerrar.sh -o c.sh && sh c.sh` |
+| `diagnostico.sh` | 🔍 Estado completo (pods, consumo, volumen, navegadores, procesos, RAM) | `curl -fsSL https://raw.githubusercontent.com/hunterhunters371-prog/navegador-remoto/main/diagnostico.sh -o d.sh && sh d.sh` |
+| `descargar.sh` | 📥 Lista archivos del pod; los extrae vía servicios externos (0x0.st/transfer.sh/file.io — suelen estar BLOQUEADOS por el firewall del sandbox) | `... /descargar.sh -o d2.sh && sh d2.sh` |
+| `publicar.sh` | 🔗 Descarga directa: expone el archivo en la propia URL del noVNC (el método que SÍ funciona en el sandbox) | `... /publicar.sh -o p.sh && sh p.sh "<archivo>"` |
+| `navegador-remoto.sh` | Stack completo para una **VM real con root** (Alpine/Debian, x86_64/ARM64): Xvfb+Chromium+x11vnc+noVNC | para cuando tenga VPS |
+| `openshift/Dockerfile` | Imagen propia con Firefox horneado (builds corren como root en el sandbox) | nivel 2, opcional |
+
+## Reglas aprendidas a las malas (no repetir)
+
+1. 🚫 **Nunca login de Google/Gmail dentro del navegador remoto** — la IP del sandbox es de datacenter compartida y Google ya bloqueó la cuenta una vez por eso. Login de Notion = **email + código** (el código se lee en el correo desde la PC/teléfono del usuario).
+2. 🚫 Nunca pegar código largo en chats ni en la terminal web — siempre descargar del repo con curl.
+3. 🚫 El Firefox viejo de la imagen (102 ESR) y el Chromium 127: Notion los rechaza. El navegador bueno es el portable en `/headless/data/firefox/`.
+4. El pod se reinicia y la terminal web se desconecta a veces (router compartido) — es normal; el pod sigue vivo.
+5. Notion carga el chat completo en RAM al abrirlo: entrar primero a una página ligera; los chats gigantes (como el que generó este proyecto) se abren solo cuando se necesitan.
+6. `oc adm top pods` = consumo real. El `free` dentro del pod muestra la RAM del NODO compartido (31 GB), no la cuota — ignorar ese número.
+
+## Pendientes / siguiente trabajo
+
+- **Recuperación de la cuenta de Google**: en curso desde la PC del usuario (accounts.google.com/signin/recovery). No reintentar logins desde el navegador remoto.
+- **Archivos RobloxAgentBridge (.rbxmx)**: estaban en `/headless/Descargas/` del pod viejo; si el pod fue redesplegado a v2.8, revisar `/headless/data/Downloads/` (volumen persistente) — extraerlos con `publicar.sh`. (Proyecto aparte: plugin de Roblox Studio que conecta con agentes.)
+- **VPS real (VPSWala)**: pedida pero sus 500 MB de disco NO alcanzan para un navegador moderno (~700 MB mínimo con Alpine). Si llega otra VPS con más disco → usar `navegador-remoto.sh`.
+- **ClawCloud Run** (run.claw.cloud): plan de respaldo 24/7 ($5/mes de crédito gratis). OJO: su regla exige cuenta GitHub de 180+ días para el crédito recurrente; la del usuario se creó el 16-ago-2026 → elegible ~mediados de feb-2027. Con Gmail dan $5 iniciales únicos.
+- **Cloud Shell** (shell.cloud.google.com): alternativa estable; el contenedor docker `jlesage/firefox` quedó creado allí (`docker start navegador` → Web Preview puerto 8080). Efímero fuera de $HOME.
+- **Multi-instancia**: la idea original era varias instancias (nav2, nav3...). Con la cuota de 14 GB caben ~2-3 con el perfil actual. Misma receta, `APP=nav2 sh os.sh`.
+- **Renovación del sandbox**: cada 30 días desde la consola de Red Hat Developer.
+
+## Cómo continuar
+
+El usuario llega al chat nuevo y dice: «Lee https://raw.githubusercontent.com/hunterhunters371-prog/navegador-remoto/main/CONTEXTO.md y seguimos». El chat nuevo debe: leer este archivo, asumir el estado de arriba como cierto, y solo pedir la salida de `diagnostico.sh` si hay síntomas nuevos.
