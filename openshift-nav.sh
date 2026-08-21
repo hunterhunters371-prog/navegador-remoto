@@ -1,6 +1,11 @@
 #!/bin/sh
 # ============================================================
 #  openshift-nav.sh — Navegador remoto ligero en OpenShift Sandbox
+#  v2.9: + RENDIMIENTO: 19 prefs nuevos de Firefox (render por
+#        software directo, sin telemetria/updates/prefetch,
+#        cache de disco topado a 50MB, menos I/O al volumen,
+#        unload de pestañas con poca RAM, accesibilidad off)
+#        + URL rapida vnc_lite en el resumen final.
 #  v2.8: + ALMACENAMIENTO PERSISTENTE (volumen de 2Gi)
 #        Tu login de Notion, tus descargas y el propio Firefox
 #        SOBREVIVEN reinicios y redespliegues. Se acabó el
@@ -118,6 +123,25 @@ user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("browser.toolbars.bookmarks.visibility", "never");
 user_pref("browser.download.folderList", 2);
 user_pref("browser.download.dir", "/headless/data/Downloads");
+user_pref("gfx.webrender.software", true);
+user_pref("media.hardware-video-decoding.enabled", false);
+user_pref("network.prefetch-next", false);
+user_pref("network.dns.disablePrefetch", true);
+user_pref("network.http.speculative-parallel-limit", 0);
+user_pref("network.predictor.enabled", false);
+user_pref("toolkit.telemetry.enabled", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("browser.ping-centre.telemetry", false);
+user_pref("app.update.auto", false);
+user_pref("app.update.service.enabled", false);
+user_pref("browser.discovery.enabled", false);
+user_pref("extensions.pocket.enabled", false);
+user_pref("accessibility.force_disabled", 1);
+user_pref("browser.tabs.unloadOnLowMemory", true);
+user_pref("browser.sessionstore.interval", 60000);
+user_pref("browser.cache.disk.capacity", 51200);
+user_pref("browser.cache.disk.smart_size.enabled", false);
 PREFS
 
 echo "==> matando navegadores viejos/de fabrica (por ruta exacta)..."
@@ -167,14 +191,23 @@ ROUTE=$(oc get route "$APP" -o jsonpath='{.spec.host}')
 cat <<FIN
 
 ============================================================
- ✅ $APP LISTO (v2.8 — con PERSISTENCIA)
+ ✅ $APP LISTO (v2.9 — PERSISTENCIA + RENDIMIENTO)
 ------------------------------------------------------------
  URL:        https://$ROUTE/?password=$VNC_PASSWORD
+ Rapida:     https://$ROUTE/vnc_lite.html?password=$VNC_PASSWORD
+             (interfaz minima: carga antes en conexion lenta)
  Contraseña: $VNC_PASSWORD
  Pagina:     Notion — ventana unica $RES (Firefox ACTUAL,
              1 SOLO proceso de contenido, login normal)
 ------------------------------------------------------------
- PERSISTENCIA (LO NUEVO E IMPORTANTE)
+ RENDIMIENTO (LO NUEVO EN v2.9)
+ · Render por software directo (no busca GPU que no existe)
+ · Sin telemetria, sin auto-updates, sin prefetch de red
+ · Cache de disco topado a 50 MB (no infla el volumen)
+ · Sesion se escribe 1 vez/min (antes: cada 15 s al volumen)
+ · Pestañas se descargan solas si falta RAM
+------------------------------------------------------------
+ PERSISTENCIA
  · Login de Notion, descargas y el Firefox viven en un
    volumen persistente ($PVC_SIZE): SOBREVIVEN reinicios
    y redespliegues. Entras una vez y quedas dentro.

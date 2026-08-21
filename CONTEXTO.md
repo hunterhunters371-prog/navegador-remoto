@@ -20,6 +20,7 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 - Persistencia implementada con PVC: login y descargas sobreviven reinicios.
 - El usuario ya fue bloqueado una vez por Google (ver regla de oro abajo).
 - **Nuevo (21 ago 2026):** respaldo en **GitHub Codespaces** listo — ver sección abajo.
+- **Nuevo (21 ago 2026, v2.9):** paquete de rendimiento en `openshift-nav.sh` — 19 prefs nuevos de Firefox (render por software directo, sin telemetría/updates/prefetch, caché de disco topado a 50 MB, sesión escribe 1/min al volumen, pestañas se descargan con poca RAM, accesibilidad off) + URL rápida `vnc_lite.html` en el resumen. En `codespaces-nav.sh` v1.1: `--shm-size=512m` (evita caídas de pestañas en docker).
 
 ## Arquitectura actual
 
@@ -31,7 +32,7 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 - **Recursos**: requests 250m/512Mi — límites 2 CPU / 5Gi RAM (cuota total del sandbox: ~14 GB RAM, 3 núcleos, 40 GB disco; se renueva cada 30 días gratis)
 - **Video**: pantalla virtual 1024x600 x 16 bits (`VNC_RESOLUTION`/`VNC_COL_DEPTH`)
 - **Volumen persistente**: PVC `nav1-data` (2Gi) montado en `/headless/data` → ahí viven: `firefox/` (binario portable), `ff-notion/` (perfil con cookies/login), `Downloads/` (descargas). Sobrevive a redespliegues y a `cerrar.sh borrar`. Solo se borra con `oc delete pvc nav1-data` o `sh c.sh nuclear`.
-- **Firefox**: portable de Mozilla en `/headless/data/firefox/firefox`, perfil `/headless/data/ff-notion` con 1 proceso de contenido (Fission apagado), sin caché RAM, sin autoplay; ventana única al tamaño de la pantalla (NO kiosko — el kiosko bloqueaba el login y la navegación).
+- **Firefox**: portable de Mozilla en `/headless/data/firefox/firefox`, perfil `/headless/data/ff-notion` con 1 proceso de contenido (Fission apagado), sin caché RAM, sin autoplay; ventana única al tamaño de la pantalla (NO kiosko — el kiosko bloqueaba el login y la navegación). Desde v2.9: render por software, telemetría/updates/prefetch apagados.
 - **Auto-revive**: vigilante cada 15 s relanza Firefox si cae. Los íconos del escritorio (IceWM menu/toolbar) apuntan al Firefox nuevo.
 - **Red**: VNC crudo solo localhost; la puerta es el 6901 web con contraseña.
 
@@ -52,7 +53,7 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 
 - **Qué es**: respaldo del navegador remoto usando la cuota gratis de Codespaces (cuenta GitHub del usuario, sin tarjeta): **120 horas-núcleo/mes** = 60 h en máquina 2-core (30 h si elige 4-core) + 15 GB de disco. NO es 24/7: el codespace se apaga solo a los ~30 min sin uso.
 - **Cómo se usa**: crear el codespace desde el repo (botón Code → Codespaces → «Create codespace on main», imagen por defecto = trae docker) → terminal → correr `codespaces-nav.sh` (comando en la tabla de arriba) → pestaña **PUERTOS/PORTS** → abrir puerto **5800** (ícono de globo).
-- **Stack**: contenedor `jlesage/firefox` (web UI en 5800), volumen docker `ff-perfil` montado en `/config` → el login de Notion sobrevive apagados del codespace. Se borra TODO solo si se elimina el codespace.
+- **Stack**: contenedor `jlesage/firefox` (web UI en 5800, `--shm-size=512m` desde v1.1), volumen docker `ff-perfil` montado en `/config` → el login de Notion sobrevive apagados del codespace. Se borra TODO solo si se elimina el codespace.
 - El puerto reenviado es PRIVADO (solo el usuario logueado en GitHub lo ve). No hacerlo público sin poner contraseña.
 - Regla de oro igual que en el sandbox: login de Notion = **email + código**, NUNCA Google.
 
@@ -70,7 +71,8 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 - **Recuperación de la cuenta de Google**: en curso desde la PC del usuario (accounts.google.com/signin/recovery). No reintentar logins desde el navegador remoto.
 - **Archivos RobloxAgentBridge (.rbxmx)**: estaban en `/headless/Descargas/` del pod viejo; si el pod fue redesplegado a v2.8, revisar `/headless/data/Downloads/` (volumen persistente) — extraerlos con `publicar.sh`. (Proyecto aparte: plugin de Roblox Studio que conecta con agentes.)
 - **VPS real (VPSWala)**: pedida pero sus 500 MB de disco NO alcanzan para un navegador moderno (~700 MB mínimo con Alpine). Si llega otra VPS con más disco → usar `navegador-remoto.sh`. NOTA (21 ago 2026): Oracle Cloud Always Free daba 4 OCPU/24 GB pero el 15-jun-2026 lo recortó a 2 OCPU/12 GB y exige tarjeta → descartado por ahora (el usuario no quiere dar tarjeta).
-- **Multi-instancia (investigado 21 ago 2026)**: NO hace falta otra cuenta — en la misma cuenta/namespace caben ~2-3 instancias (`APP=nav2 sh os.sh`). Crear una segunda cuenta de Red Hat viola sus términos (prohíben múltiples cuentas para eludir límites) y pide otro SMS de teléfono → descartado.
+- **Multi-instancia (investigado 21 ago 2026)**: NO hace falta otra cuenta — en la misma cuenta/namespace caben ~2-3 instancias (`APP=nav2 sh os.sh`; si la cuota se queja por límites, usar `APP=nav2 LIM_MEM=3Gi sh os.sh`). Crear una segunda cuenta de Red Hat viola sus términos (prohíben múltiples cuentas para eludir límites) y pide otro SMS de teléfono → descartado.
+- **Mejoras de rendimiento pendientes (analizadas 21 ago 2026)**: (B) Dockerfile que hornee el Firefox de Mozilla (no el ESR de dnf) para arranques sin descarga; (E) auto-relanzar Firefox si el SANDBOX recrea el pod (FAQ: pods se borran tras 12 h corridas — el vigilante muere con el pod; verificar hook de arranque de la imagen consol, p.ej. icewm startup). A+C+D ya aplicados en v2.9 / v1.1.
 - **Otras plataformas gratis sin tarjeta (investigado 21 ago 2026)**: ClawCloud Run ($5/mes cuando el GitHub cumpla 180 días, ~feb-2027) es el único 24/7 viable futuro. Google Cloud Shell (50 h/semana) y Codespaces (60 h/mes) = respaldos por horas. Zeabur/Koyeb/Render/Back4app duermen o tienen ≤512 MB RAM → no sirven. Railway = $5 únicos. Ojo con sitios de «VPS gratis sin tarjeta»: casi todos son estafa.
 - **ClawCloud Run** (run.claw.cloud): plan de respaldo 24/7 ($5/mes de crédito gratis). OJO: su regla exige cuenta GitHub de 180+ días para el crédito recurrente; la del usuario se creó el 16-ago-2026 → elegible ~mediados de feb-2027. Con Gmail dan $5 iniciales únicos.
 - **Cloud Shell** (shell.cloud.google.com): alternativa estable; el contenedor docker `jlesage/firefox` quedó creado allí (`docker start navegador` → Web Preview puerto 8080). Efímero fuera de $HOME.
