@@ -1,9 +1,9 @@
 #!/bin/sh
 # ============================================================
 #  openshift-nav.sh — Navegador remoto ligero en OpenShift Sandbox
-#  v2.4: + fuerza 1 SOLO proceso de contenido en Firefox 154
-#        (apaga Fission + procesos pre-lanzados: -200/400 MB)
-#  Techo RAM 3Gi · auto-revive · ventana unica 1024x600x16
+#  v2.5: + fija la carpeta de descargas a /headless/Downloads
+#        (Firefox en español usaba "Descargas" y confundía la búsqueda)
+#  1 proceso real · techo RAM 3Gi · auto-revive · 1024x600x16
 #  Idempotente. Ejecutar en la TERMINAL WEB de OpenShift (icono >_)
 #
 #  Uso:  sh openshift-nav.sh
@@ -81,7 +81,7 @@ else
   echo "==> Firefox actual ya estaba instalado"
 fi
 
-mkdir -p ff-notion
+mkdir -p ff-notion Downloads
 cat > ff-notion/user.js <<PREFS
 user_pref("dom.ipc.processCount", 1);
 user_pref("fission.autostart", false);
@@ -94,6 +94,8 @@ user_pref("browser.newtabpage.enabled", false);
 user_pref("browser.sessionstore.resume_from_crash", false);
 user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("browser.toolbars.bookmarks.visibility", "never");
+user_pref("browser.download.folderList", 2);
+user_pref("browser.download.dir", "/headless/Downloads");
 PREFS
 
 echo "==> matando navegadores viejos/de fabrica (por ruta exacta)..."
@@ -129,7 +131,7 @@ ROUTE=$(oc get route "$APP" -o jsonpath='{.spec.host}')
 cat <<FIN
 
 ============================================================
- ✅ $APP OPTIMIZADO Y LISTO (v2.4)
+ ✅ $APP OPTIMIZADO Y LISTO (v2.5)
 ------------------------------------------------------------
  URL:        https://$ROUTE/?password=$VNC_PASSWORD
  Contraseña: $VNC_PASSWORD
@@ -142,6 +144,7 @@ cat <<FIN
    sin cache RAM, sin historial en memoria, sin autoplay
  · Limites: $REQ_MEM min / $LIM_MEM max RAM
  · Auto-revive: si Firefox cae, se relanza solo en ~15 s
+ · Descargas fijadas en /headless/Downloads (predecibles)
 ------------------------------------------------------------
  COMO ENTRAR A NOTION:
  · La ventana abre directo en Notion.
