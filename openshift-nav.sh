@@ -1,20 +1,21 @@
 #!/bin/sh
 # ============================================================
 #  openshift-nav.sh — Navegador remoto ligero en OpenShift Sandbox
-#  v2.1: IceWM + Firefox ACTUAL en kiosko + AUTO-VERIFICACIÓN
-#  Detección del pod por prefijo de nombre (robusta).
-#  Idempotente. Ejecutar en la TERMINAL WEB de OpenShift (icono >_)
+#  v2.2: IceWM + Firefox ACTUAL en VENTANA ÚNICA a tamaño completo
+#  (sin kiosko restrictivo: login y navegación funcionan normal)
+#  Detección del pod por nombre. Idempotente.
+#  Ejecutar en la TERMINAL WEB de OpenShift (icono >_)
 #
 #  Uso:  sh openshift-nav.sh
 #        VNC_PASSWORD=miclave sh openshift-nav.sh
-#        RES=1024x600 DEPTH=16 sh openshift-nav.sh   (menos video)
+#        RES=1280x720 DEPTH=16 sh openshift-nav.sh
 # ============================================================
 set -eu
 
 APP="${APP:-nav1}"
 IMG="${IMG:-docker.io/consol/rocky-icewm-vnc}"
 VNC_PASSWORD="${VNC_PASSWORD:-notion2026}"
-RES="${RES:-1280x720}"
+RES="${RES:-1024x600}"
 DEPTH="${DEPTH:-16}"
 REQ_CPU="${REQ_CPU:-250m}"; REQ_MEM="${REQ_MEM:-512Mi}"
 LIM_CPU="${LIM_CPU:-1}";    LIM_MEM="${LIM_MEM:-2Gi}"
@@ -59,10 +60,13 @@ POD=$(oc get pods --no-headers 2>/dev/null | awk -v app="$APP" '$1 ~ ("^" app "-
 log "Pod activo: $POD"
 
 # ---------- 6. Dentro del pod: matar viejo, instalar nuevo, VERIFICAR ----------
-log "Instalando Firefox actual + perfil de 1 proceso dentro del pod..."
-oc exec -i "$POD" -- sh -s <<'INNER'
+log "Instalando Firefox actual + perfil ligero dentro del pod..."
+oc exec -i "$POD" -- env FF_RES="$RES" FF_URL="$FF_URL" sh -s <<'INNER'
 set -e
 cd "$HOME"
+
+W=$(echo "$FF_RES" | cut -dx -f1)
+H=$(echo "$FF_RES" | cut -dx -f2)
 
 echo "==> Navegadores presentes en la imagen (viejos):"
 ls /usr/bin 2>/dev/null | grep -iE 'firefox|chrom' || echo "   (ninguno en /usr/bin)"
@@ -85,6 +89,9 @@ user_pref("browser.sessionhistory.max_total_viewers", 0);
 user_pref("media.autoplay.default", 5);
 user_pref("toolkit.cosmeticAnimations.enabled", false);
 user_pref("browser.newtabpage.enabled", false);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.toolbars.bookmarks.visibility", "never");
 PREFS
 
 echo "==> matando navegadores viejos/de fabrica (por ruta exacta)..."
@@ -95,8 +102,8 @@ pkill -f firefox-esr 2>/dev/null || true
 pkill -f "$HOME/firefox/firefox" 2>/dev/null || true
 sleep 1
 
-echo "==> lanzando Firefox ACTUAL en kiosko..."
-DISPLAY=:1 nohup "$HOME/firefox/firefox" --kiosk --profile "$HOME/ff-notion" "https://www.""notion.so" >/dev/null 2>&1 &
+echo "==> lanzando Firefox ACTUAL en ventana unica ${W}x${H}..."
+DISPLAY=:1 nohup "$HOME/firefox/firefox" --width "$W" --height "$H" --profile "$HOME/ff-notion" "$FF_URL" >/dev/null 2>&1 &
 sleep 6
 
 echo "==> VERIFICACION de que navegador corre realmente:"
@@ -105,7 +112,7 @@ if ps aux | grep "$HOME/firefox/firefox" | grep -qv grep; then
   echo "   [OK] el proceso en ejecucion ES el Firefox nuevo (portable, ultima version)"
 else
   echo "   [ERROR] el Firefox nuevo no esta corriendo. Salida cruda del intento:"
-  DISPLAY=:1 "$HOME/firefox/firefox" --kiosk --profile "$HOME/ff-notion" "https://www.""notion.so" 2>&1 | head -15 || true
+  DISPLAY=:1 "$HOME/firefox/firefox" --width "$W" --height "$H" --profile "$HOME/ff-notion" "$FF_URL" 2>&1 | head -15 || true
 fi
 echo "==> procesos de navegador activos ahora:"
 ps aux | grep -iE 'firefox|chrom' | grep -v grep || echo "   (ninguno)"
@@ -120,7 +127,8 @@ cat <<FIN
 ------------------------------------------------------------
  URL:        https://$ROUTE/?password=$VNC_PASSWORD
  Contraseña: $VNC_PASSWORD
- Pagina:     Notion (kiosko, Firefox ACTUAL, 1 solo proceso)
+ Pagina:     Notion — ventana unica $RES (Firefox ACTUAL,
+             1 proceso, login y navegacion NORMALES)
 ------------------------------------------------------------
  AJUSTES DE CONSUMO APLICADOS
  · Escritorio IceWM (el mas liviano de la familia probada aqui)
@@ -129,9 +137,16 @@ cat <<FIN
    sin animaciones ni autoplay
  · Limites: $REQ_MEM min / $LIM_MEM max RAM (anti-OOM)
 ------------------------------------------------------------
- REGLA VISUAL (para no confundir navegadores):
- · Pantalla COMPLETA sin barras ni pestañas = Firefox NUEVO ✓
- · Ventana normal con menus/iconos = el viejo de 2023 ✗ (cierrala)
+ COMO ENTRAR A NOTION:
+ · La ventana abre directo en Notion.
+ · Login recomendado: con tu email te mandan un codigo
+   (todo pasa en la misma ventana, sin popups).
+ · El boton de Google abre popup: ahora SÍ funciona,
+   porque ya no es kiosko.
+------------------------------------------------------------
+ REGLA VISUAL:
+ · La ventana que abre SOLA con Notion = Firefox NUEVO ✓
+ · Iconos del escritorio / menus viejos = el de 2023 ✗
 ------------------------------------------------------------
  SI EL POD SE REINICIA: vuelve a ejecutar  sh openshift-nav.sh
  Verificar consumo en vivo:  oc adm top pods
