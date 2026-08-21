@@ -1,13 +1,14 @@
 # Navegador remoto ultra-ligero
 
-Scripts para tener un navegador moderno (compatible con Notion) accesible desde cualquier navegador web, con el mínimo consumo de RAM/CPU/disco.
+Scripts para tener un navegador moderno (compatible con Notion) accesible desde cualquier navegador web, con el mínimo consumo de RAM/CPU/disco. Todo se usa por URL: copias una línea y listo.
 
 ## Contenido
 
-| Script | Dónde corre | Qué hace |
+| Archivo | Dónde corre | Qué hace |
 |---|---|---|
-| `openshift-nav.sh` | Terminal web de **Red Hat Developer Sandbox** (OpenShift) | Redepliega todo optimizado: IceWM + Firefox actual en modo kiosko (1 proceso, sin caché RAM, 1280x720x16), límites anti-OOM, ruta pública. Idempotente. |
-| `navegador-remoto.sh` | **VM real** con root (Alpine 3.20+ / Debian 12+, x86_64 o ARM64) | Instala el stack mínimo desde cero: Xvfb + Chromium kiosko + x11vnc + noVNC, sin escritorio, con zram, servicio con auto-reinicio, verificación y prueba de rendimiento de 60 s. Idempotente. |
+| `openshift-nav.sh` | Terminal web de **Red Hat Developer Sandbox** (OpenShift) | Redepliega todo optimizado: IceWM + Firefox **actual** en modo kiosko (1 proceso, sin caché RAM, 1280x720x16), límites anti-OOM, ruta pública, y **auto-verifica** qué navegador quedó corriendo (versión + proceso real). Idempotente. |
+| `openshift/Dockerfile` | **Build** dentro del sandbox | Imagen propia con Firefox actualizado horneado (las builds corren como root aunque los pods no). Sobrevive reinicios del pod. |
+| `navegador-remoto.sh` | **VM real** con root (Alpine 3.20+ / Debian 12+, x86_64 o ARM64) | Stack mínimo desde cero: Xvfb + Chromium kiosko + x11vnc + noVNC, sin escritorio, zram, servicio con auto-reinicio, verificación y prueba de rendimiento de 60 s. Idempotente. |
 
 ## Uso rápido
 
@@ -21,6 +22,16 @@ Con tu propia contraseña:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/hunterhunters371-prog/navegador-remoto/main/openshift-nav.sh -o os.sh && VNC_PASSWORD='TuClave' sh os.sh
+```
+
+### Nivel 2 — tu propia imagen (Firefox horneado, sobrevive reinicios)
+
+```bash
+oc new-build https://github.com/hunterhunters371-prog/navegador-remoto --name navimg --context-dir=openshift
+oc start-build navimg --follow
+oc new-app navimg --name nav2 -e VNC_PW=miclave -e VNC_RESOLUTION=1280x720 -e VNC_COL_DEPTH=16
+oc set resources deployment nav2 --requests=cpu=250m,memory=512Mi --limits=cpu=1,memory=2Gi
+oc create route edge nav2 --service nav2 --port 6901 --insecure-policy Redirect
 ```
 
 ### VM real con root (Alpine/Debian, por SSH)
@@ -41,9 +52,23 @@ Con tu propia contraseña y otra página de inicio:
 sudo VNC_PASSWORD='TuClave' HOME_URL='https://tupagina.com' sh rb.sh
 ```
 
-## Notas
+## Preguntas frecuentes
 
-- Ambos scripts son **idempotentes**: puedes ejecutarlos varias veces sin romper nada; reconfiguran y relanzan.
-- Si el pod de OpenShift se reinicia (sandbox efímero), basta con volver a correr el comando de OpenShift.
-- Requisitos mínimos reales para la VM: ~700 MB RAM libres y ~900 MB de disco (un navegador moderno no cabe en 500 MB de disco).
+**¿Se puede rootear el sandbox de OpenShift?**
+No: los pods corren con usuario aleatorio sin privilegios (regla del clúster). Pero las *builds* de imagen sí corren como root — por eso existe `openshift/Dockerfile`: controlas todo lo que va dentro de tu propia imagen. Para root verdadero necesitas una VM real (y ahí corre `navegador-remoto.sh`).
+
+**¿Cómo distingo el navegador nuevo del viejo?**
+Pantalla completa sin barras ni pestañas (kiosko) = Firefox nuevo. Ventana normal con menús = el viejo de la imagen de 2023.
+
+**¿Si el pod se reinicia?**
+Vuelve a correr el comando de OpenShift (es idempotente). Con la imagen propia (Nivel 2) ni siquiera hace falta reinstalar el navegador.
+
+## Requisitos mínimos reales
+
+- VM real: ~700 MB RAM libres y ~900 MB de disco (un navegador moderno no cabe en 500 MB de disco).
+- Sandbox: nada — el script se encarga de todo.
+
+## Seguridad
+
 - No almacenes secretos en estos scripts; la contraseña por defecto es solo un marcador — cámbiala siempre con `VNC_PASSWORD`.
+- El VNC crudo solo escucha en localhost; tu puerta de entrada es el puerto web con contraseña.
