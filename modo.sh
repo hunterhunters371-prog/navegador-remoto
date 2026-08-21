@@ -1,12 +1,14 @@
 #!/bin/sh
 # ============================================================
 #  modo.sh — interruptor de nav1: PANTALLA (VNC) <-> LIGERO (texto)
-#  v1.1 EXPERIMENTAL
-#    · el destino se valida: solo URLs de Notion (evita apuntar
-#      el headless a la URL del VNC por error)
-#    · nuevo /debug?clave=... : reporta que esta viendo el
-#      Firefox headless (url, titulo, composer, login)
-#  v1.0: Firefox headless + Marionette + mini chat web de texto
+#  v1.2 EXPERIMENTAL
+#    · la respuesta se muestra MIENTRAS se genera (texto parcial
+#      en vivo en la burbuja, no solo al final)
+#    · boton 🪞 Espejo: muestra el texto actual de la pagina de
+#      Notion actualizandose cada 4 s (imitacion en vivo, solo texto)
+#  v1.1 · el destino se valida: solo URLs de Notion
+#       · nuevo /debug?clave=... : que esta viendo el headless
+#  v1.0 · Firefox headless + Marionette + mini chat web de texto
 #
 #  Uso (terminal web de OpenShift, icono >_):
 #    sh modo.sh ligero     → activa/actualiza el chat de texto
@@ -74,6 +76,7 @@ jobs = {}
 contador = [0]
 cont_lock = threading.Lock()
 m_lock = threading.Lock()   # Marionette NO es hilo-seguro: 1 pregunta a la vez
+vivo = {"texto": "", "job": None}   # texto parcial de la respuesta en curso
 
 # ---------------- Marionette minimo (solo stdlib) ----------------
 class Marionette:
@@ -223,6 +226,8 @@ def extraer(actual, base, prompt):
 
 def trabajar(job_id, texto):
     with m_lock:
+        vivo["job"] = job_id
+        vivo["texto"] = ""
         try:
             asegurar_pagina()
             base = leer()["texto"]
@@ -236,6 +241,7 @@ def trabajar(job_id, texto):
                 time.sleep(2)
                 info = leer()
                 cand = extraer(info["texto"], base, texto)
+                vivo["texto"] = cand
                 if info["escribiendo"]:
                     anterior = cand
                     estable = 0
@@ -288,7 +294,23 @@ class H(BaseHTTPRequestHandler):
         if path == "/estado":
             q = parse_qs(urlparse(self.path).query)
             jid = int(q.get("id", ["0"])[0])
-            self._json(jobs.get(jid, {"listo": False}))
+            job = jobs.get(jid, {"listo": False})
+            if not job.get("listo") and vivo.get("job") == jid and vivo.get("texto"):
+                job = dict(job)
+                job["parcial"] = vivo["texto"]
+            self._json(job)
+            return
+        if path == "/espejo":
+            if m_lock.locked():
+                self._json({"ocupado": True, "texto": vivo.get("texto", "")})
+                return
+            with m_lock:
+                try:
+                    info = leer()
+                    txt = info.get("texto") or ""
+                    self._json({"ocupado": False, "texto": txt[-4000:], "escribiendo": info.get("escribiendo", False)})
+                except Exception as e:
+                    self._json({"ocupado": False, "texto": "", "error": str(e)})
             return
         if path == "/destino":
             self._json({"destino": destino_actual()})
@@ -357,16 +379,19 @@ PYEOF
   .m { max-width:85%; padding:10px 12px; border-radius:12px; white-space:pre-wrap; word-wrap:break-word; }
   .yo { align-self:flex-end; background:#2f6fed; }
   .ia { align-self:flex-start; background:#1d212b; border:1px solid #2a2f3a; }
+  .parcial { opacity:.75; }
   .estado { align-self:center; color:#8b93a3; font-size:13px; }
   footer { padding:10px; background:#171a21; display:flex; gap:8px; }
   textarea { flex:1; resize:none; height:52px; }
   #cfg { display:none; width:100%; }
   #cfg input { flex:1; }
+  #espejo { display:none; flex:1; overflow-y:auto; margin:0; padding:14px; white-space:pre-wrap; word-wrap:break-word; font:13px/1.5 ui-monospace, Menlo, monospace; color:#c9d1d9; }
 </style>
 </head>
 <body>
 <header>
   <b>⚡ Notion AI — modo ligero</b>
+  <button id="bespejo" type="button" title="Espejo: ver la pagina en texto, en vivo">🪞</button>
   <button id="bcfg" type="button">⚙</button>
 </header>
 <header id="cfg">
@@ -375,6 +400,7 @@ PYEOF
   <button id="bg" type="button">Guardar</button>
 </header>
 <div id="msgs"></div>
+<pre id="espejo"></pre>
 <footer>
   <textarea id="t" placeholder="Escribe tu mensaje... (Enter envia, Shift+Enter salto)"></textarea>
   <button id="b">Enviar</button>
@@ -384,6 +410,8 @@ var $ = function(id){ return document.getElementById(id); };
 var msgs = $("msgs");
 var clave = localStorage.getItem("nl_clave") || "";
 $("clave").value = clave;
+var burbuja = null;
+var espejoOn = false;
 
 function add(cls, txt) {
   var d = document.createElement("div");
@@ -409,6 +437,19 @@ $("bcfg").onclick = function() {
   c.style.display = (c.style.display === "flex") ? "none" : "flex";
   api("/destino").then(function(d){ $("destino").value = d.destino || ""; }).catch(function(){});
 };
+$("bespejo").onclick = function() {
+  espejoOn = !espejoOn;
+  $("espejo").style.display = espejoOn ? "block" : "none";
+  msgs.style.display = espejoOn ? "none" : "flex";
+  if (espejoOn) tickEspejo();
+};
+function tickEspejo() {
+  if (!espejoOn) return;
+  api("/espejo").then(function(d) {
+    $("espejo").textContent = d.texto || (d.error ? ("⚠ " + d.error) : "(la pagina aun no muestra texto)");
+  }).catch(function(){});
+  setTimeout(tickEspejo, 4000);
+}
 $("bg").onclick = function() {
   clave = $("clave").value.trim();
   localStorage.setItem("nl_clave", clave);
@@ -422,6 +463,7 @@ function enviar() {
   $("t").value = "";
   add("yo", t);
   $("b").disabled = true;
+  burbuja = null;
   estado("enviando...");
   api("/preguntar", {method:"POST", body:t}).then(function(r) {
     if (r.error) { estado(""); add("ia", "⚠ " + r.error); $("b").disabled = false; return; }
@@ -431,11 +473,18 @@ function enviar() {
         api("/estado?id=" + r.id).then(function(s) {
           if (s.listo) {
             estado("");
+            if (burbuja) { burbuja.remove(); burbuja = null; }
             add("ia", s.texto || "(vacio)");
             if (s.error) add("estado", "⚠ " + s.error);
             $("b").disabled = false;
             $("t").focus();
           } else {
+            if (s.parcial) {
+              estado("");
+              if (!burbuja) burbuja = add("ia parcial", "");
+              burbuja.textContent = s.parcial + " ▍";
+              msgs.scrollTop = msgs.scrollHeight;
+            }
             poll();
           }
         }).catch(function() { poll(); });
@@ -498,16 +547,16 @@ INNER
   cat <<FIN
 
 ============================================================
- ✅ MODO LIGERO ACTIVO (v1.1 experimental)
+ ✅ MODO LIGERO ACTIVO (v1.2 experimental)
 ------------------------------------------------------------
  Abre en tu PC/telefono:  https://$RUTA/
  Clave (te la pide una vez, boton ⚙): $CLAVE
 ------------------------------------------------------------
+ · NUEVO: la respuesta se va viendo MIENTRAS se genera.
+ · NUEVO: boton 🪞 = espejo de texto de la pagina (cada 4 s).
  · El DESTINO (boton ⚙) debe ser una pagina de NOTION,
    ej: https://www.notion.so/chat  —  NUNCA la URL del VNC.
- · Diagnostico (si algo no responde): abre
-   https://$RUTA/debug?clave=$CLAVE
-   y pegale al chat el JSON que aparece.
+ · Diagnostico: https://$RUTA/debug?clave=$CLAVE
 ------------------------------------------------------------
  Si algo falla: vuelve a la normalidad con
    sh modo.sh pantalla

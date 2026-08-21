@@ -21,7 +21,7 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 - El usuario ya fue bloqueado una vez por Google (ver regla de oro abajo).
 - **Nuevo (21 ago 2026):** respaldo en **GitHub Codespaces** listo — ver sección abajo.
 - **Nuevo (21 ago 2026, v2.9):** paquete de rendimiento en `openshift-nav.sh` — 19 prefs nuevos de Firefox (render por software directo, sin telemetría/updates/prefetch, caché de disco topado a 50 MB, sesión escribe 1/min al volumen, pestañas se descargan con poca RAM, accesibilidad off) + URL rápida `vnc_lite.html` en el resumen. En `codespaces-nav.sh` v1.1: `--shm-size=512m` (evita caídas de pestañas en docker).
-- **Nuevo (21 ago 2026, `modo.sh` v1.1):** interruptor pantalla↔**texto ligero** (experimental) — ver sección «Modo ligero» abajo. Motivo: el lag venía del VIDEO del VNC, no de la RAM.
+- **Nuevo (21 ago 2026, `modo.sh` v1.2):** interruptor pantalla↔**texto ligero** (experimental) — ver sección «Modo ligero» abajo. Motivo: el lag venía del VIDEO del VNC, no de la RAM.
 
 ## Arquitectura actual
 
@@ -48,7 +48,7 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 | `descargar.sh` | 📥 Lista archivos del pod; los extrae vía servicios externos (0x0.st/transfer.sh/file.io — suelen estar BLOQUEADOS por el firewall del sandbox) | `... /descargar.sh -o d2.sh && sh d2.sh` |
 | `publicar.sh` | 🔗 Descarga directa: expone el archivo en la propia URL del noVNC (el método que SÍ funciona en el sandbox) | `... /publicar.sh -o p.sh && sh p.sh "<archivo>"` |
 | `codespaces-nav.sh` | 🐙 Firefox web (jlesage/firefox, puerto 5800) en **GitHub Codespaces** | `curl -fsSL https://raw.githubusercontent.com/hunterhunters371-prog/navegador-remoto/main/codespaces-nav.sh -o cs.sh && sh cs.sh` |
-| `modo.sh` | 🔀 Interruptor: pantalla (VNC) ↔ **texto ligero** (mini chat web con tu Notion AI) | `curl -fsSL https://raw.githubusercontent.com/hunterhunters371-prog/navegador-remoto/main/modo.sh -o m.sh && sh m.sh ligero` |
+| `modo.sh` | 🔀 Interruptor: pantalla (VNC) ↔ **texto ligero** (mini chat web con tu Notion AI + espejo 🪞) | `curl -fsSL https://raw.githubusercontent.com/hunterhunters371-prog/navegador-remoto/main/modo.sh -o m.sh && sh m.sh ligero` |
 | `navegador-remoto.sh` | Stack completo para una **VM real con root** (Alpine/Debian, x86_64/ARM64): Xvfb+Chromium+x11vnc+noVNC | para cuando tenga VPS |
 | `openshift/Dockerfile` | Imagen propia con Firefox horneado (builds corren como root en el sandbox) | nivel 2, opcional |
 
@@ -66,14 +66,16 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 - **Por qué existe**: el «lag» que molesta al usuario NO es la RAM — es el **video** del VNC (stream continuo por una ruta de datacenter compartida). Una IA no necesita pantalla: basta hablar con la página y mover texto.
 - **Qué hace `modo.sh ligero`** (interruptor sobre el MISMO pod de nav1):
   1. Crea service+ruta `$APP-chat` (puerto 6902, edge/Redirect) reutilizando el selector del service original.
-  2. Instala en el volumen (`/headless/data/chat/`): `server.py` (puente Python solo-stdlib) y `chat.html` (mini UI de ~8 KB).
+  2. Instala en el volumen (`/headless/data/chat/`): `server.py` (puente Python solo-stdlib) y `chat.html` (mini UI de ~10 KB).
   3. Mata el vigilante y el Firefox de pantalla; arranca **Firefox headless** con `--marionette` (protocolo nativo de control de Firefox, puerto 2828, sin descargar nada) usando el MISMO perfil `ff-notion` (login intacto).
   4. Levanta `server.py` en 6902: sirve el chat; `POST /preguntar` escribe en el composer de Notion AI (truco `execCommand("insertText")` + Enter sintético) y espera la respuesta leyendo `innerText` de `main` hasta que queda estable y no hay botón Stop/Detener. Patrón async (job + `/estado`) para esquivar el timeout ~30 s de la ruta HAProxy.
+- **Espejo y streaming (v1.2)**: `/estado` devuelve `parcial` mientras genera (la burbuja se actualiza en vivo, cada 2.5 s); el botón 🪞 llama `/espejo` (cada 4 s) y muestra el texto actual de la página (últimos 4000 caracteres; si hay pregunta en curso devuelve el parcial — Marionette es mono-hilo con lock).
 - **Clave**: se genera una vez en `/headless/data/chat/clave.txt`, la imprime modo.sh; la mini-web la guarda en localStorage. El endpoint `/debug?clave=...` (v1.1) reporta qué está viendo el headless (url, título, composer, ¿pantalla de login?).
 - **Destino por defecto**: https://www.notion.so/chat — cambiable en el ⚙ de la mini-web o en `destino.txt`. **Desde v1.1 se valida que contenga "notion"** (el usuario puso por error la URL del VNC y el headless quedó navegando al noVNC — no repetir).
+- **Si el pod cae/se desconecta** (pregunta del usuario 21 ago): la mini-web se cae CON el pod (vive dentro), pero NADA se pierde — clave/destino/server.py/login están en el volumen y la conversación vive en los servidores de Notion. Al volver el pod: `sh m.sh ligero` y listo. (El pendiente E —auto-arranque tras recreación— cubriría reactivarlo solo.)
 - **Volver**: `sh modo.sh pantalla` mata server.py + headless y relanza el Firefox gráfico + vigilante (mismo código que os.sh).
 - **Estado de la prueba (21 ago 2026 ~22:35Z)**: mini-web OK, clave OK, mensajes llegan al puente; pendiente confirmar que Notion AI responda con el destino correcto (el primer intento quedó en "pensando..." por el destino errado).
-- **Limitaciones**: UNA pregunta a la vez (lock); heurísticas genéricas (contenteditable + texto estable + botón Stop/Detener) — si Notion cambia su interfaz hay que ajustar `server.py`; el escritorio VNC (Xvfb/IceWM) sigue corriendo idle en modo ligero; pantalla y ligero NUNCA a la vez (el perfil se bloquearía).
+- **Limitaciones**: UNA pregunta a la vez (lock); heurísticas genéricas (contenteditable + texto estable + botón Stop/Detener) — si Notion cambia su interfaz hay que ajustar `server.py`; el escritorio VNC (Xvfb/IceWM) sigue corriendo idle en modo ligero; pantalla y ligero NUNCA a la vez (el perfil se bloquearía); el espejo es de TEXTO, no de píxeles (clonar imagen en vivo = video = el lag que estamos evitando).
 - **Si falla**: `sh modo.sh pantalla` restaura lo de siempre; pedir salida completa del comando + el JSON de `/debug?clave=...` y ajustar selectores/heurísticas.
 
 ## Reglas aprendidas a las malas (no repetir)
