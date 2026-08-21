@@ -21,7 +21,7 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 - El usuario ya fue bloqueado una vez por Google (ver regla de oro abajo).
 - **Nuevo (21 ago 2026):** respaldo en **GitHub Codespaces** listo — ver sección abajo.
 - **Nuevo (21 ago 2026, v2.9):** paquete de rendimiento en `openshift-nav.sh` — 19 prefs nuevos de Firefox (render por software directo, sin telemetría/updates/prefetch, caché de disco topado a 50 MB, sesión escribe 1/min al volumen, pestañas se descargan con poca RAM, accesibilidad off) + URL rápida `vnc_lite.html` en el resumen. En `codespaces-nav.sh` v1.1: `--shm-size=512m` (evita caídas de pestañas en docker).
-- **Nuevo (21 ago 2026, `modo.sh` v1.0):** interruptor pantalla↔**texto ligero** (experimental) — ver sección «Modo ligero» abajo. Motivo: el lag venía del VIDEO del VNC, no de la RAM.
+- **Nuevo (21 ago 2026, `modo.sh` v1.1):** interruptor pantalla↔**texto ligero** (experimental) — ver sección «Modo ligero» abajo. Motivo: el lag venía del VIDEO del VNC, no de la RAM.
 
 ## Arquitectura actual
 
@@ -29,6 +29,7 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 - **Consola**: https://console-openshift-console.apps.rm1.0a51.p1.openshiftapps.com
 - **App**: `nav1` (imagen `docker.io/consol/rocky-icewm-vnc` — Rocky Linux 9 + IceWM; contiene Firefox 102 ESR viejo que NO se usa)
 - **Ruta/URL**: https://nav1-dayalert7-dev.apps.rm1.0a51.p1.openshiftapps.com (edge/Redirect, puerto 6901; acceso con `?password=<VNC_PASSWORD>`)
+- **Ruta del chat ligero**: https://nav1-chat-dayalert7-dev.apps.rm1.0a51.p1.openshiftapps.com (puerto 6902; clave en `/headless/data/chat/clave.txt`)
 - **Contraseña VNC**: la por defecto de `openshift-nav.sh` (cambiable con `VNC_PASSWORD=`)
 - **Recursos**: requests 250m/512Mi — límites 2 CPU / 5Gi RAM (cuota total del sandbox: ~14 GB RAM, 3 núcleos, 40 GB disco; se renueva cada 30 días gratis)
 - **Video**: pantalla virtual 1024x600 x 16 bits (`VNC_RESOLUTION`/`VNC_COL_DEPTH`)
@@ -60,7 +61,7 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 - Regla de oro igual que en el sandbox: login de Notion = **email + código**, NUNCA Google.
 - **Probado (21 ago 2026)**: el usuario lo levantó en el codespace `opulent-zebra-jr4x7x6vvw7rhp9q5` — funcionó tras aclarar que `cs.sh` va en Codespaces y `os.sh` en OpenShift. Bug de URL impresa (llaves dobles) corregido en v1.2.
 
-## Modo ligero de texto (experimental, v1.0) — agregado 21 ago 2026
+## Modo ligero de texto (experimental) — agregado 21 ago 2026
 
 - **Por qué existe**: el «lag» que molesta al usuario NO es la RAM — es el **video** del VNC (stream continuo por una ruta de datacenter compartida). Una IA no necesita pantalla: basta hablar con la página y mover texto.
 - **Qué hace `modo.sh ligero`** (interruptor sobre el MISMO pod de nav1):
@@ -68,11 +69,12 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
   2. Instala en el volumen (`/headless/data/chat/`): `server.py` (puente Python solo-stdlib) y `chat.html` (mini UI de ~8 KB).
   3. Mata el vigilante y el Firefox de pantalla; arranca **Firefox headless** con `--marionette` (protocolo nativo de control de Firefox, puerto 2828, sin descargar nada) usando el MISMO perfil `ff-notion` (login intacto).
   4. Levanta `server.py` en 6902: sirve el chat; `POST /preguntar` escribe en el composer de Notion AI (truco `execCommand("insertText")` + Enter sintético) y espera la respuesta leyendo `innerText` de `main` hasta que queda estable y no hay botón Stop/Detener. Patrón async (job + `/estado`) para esquivar el timeout ~30 s de la ruta HAProxy.
-- **Clave**: se genera una vez en `/headless/data/chat/clave.txt`, la imprime modo.sh; la mini-web la guarda en localStorage.
-- **Destino por defecto**: https://www.notion.so/chat — cambiable en el ⚙ de la mini-web o en `destino.txt`.
+- **Clave**: se genera una vez en `/headless/data/chat/clave.txt`, la imprime modo.sh; la mini-web la guarda en localStorage. El endpoint `/debug?clave=...` (v1.1) reporta qué está viendo el headless (url, título, composer, ¿pantalla de login?).
+- **Destino por defecto**: https://www.notion.so/chat — cambiable en el ⚙ de la mini-web o en `destino.txt`. **Desde v1.1 se valida que contenga "notion"** (el usuario puso por error la URL del VNC y el headless quedó navegando al noVNC — no repetir).
 - **Volver**: `sh modo.sh pantalla` mata server.py + headless y relanza el Firefox gráfico + vigilante (mismo código que os.sh).
-- **Limitaciones v1**: UNA pregunta a la vez (lock); heurísticas genéricas (contenteditable + texto estable + botón Stop/Detener) — si Notion cambia su interfaz hay que ajustar `server.py`; el escritorio VNC (Xvfb/IceWM) sigue corriendo idle en modo ligero; pantalla y ligero NUNCA a la vez (el perfil se bloquearía).
-- **Si falla**: `sh modo.sh pantalla` restaura lo de siempre; pedir salida completa del comando y ajustar selectores/heurísticas.
+- **Estado de la prueba (21 ago 2026 ~22:35Z)**: mini-web OK, clave OK, mensajes llegan al puente; pendiente confirmar que Notion AI responda con el destino correcto (el primer intento quedó en "pensando..." por el destino errado).
+- **Limitaciones**: UNA pregunta a la vez (lock); heurísticas genéricas (contenteditable + texto estable + botón Stop/Detener) — si Notion cambia su interfaz hay que ajustar `server.py`; el escritorio VNC (Xvfb/IceWM) sigue corriendo idle en modo ligero; pantalla y ligero NUNCA a la vez (el perfil se bloquearía).
+- **Si falla**: `sh modo.sh pantalla` restaura lo de siempre; pedir salida completa del comando + el JSON de `/debug?clave=...` y ajustar selectores/heurísticas.
 
 ## Reglas aprendidas a las malas (no repetir)
 
@@ -83,6 +85,7 @@ Navegador remoto completo y gratis para usar **Notion** (incluidos chats pesados
 5. Notion carga el chat completo en RAM al abrirlo: entrar primero a una página ligera; los chats gigantes (como el que generó este proyecto) se abren solo cuando se necesitan.
 6. `oc adm top pods` = consumo real. El `free` dentro del pod muestra la RAM del NODO compartido (31 GB), no la cuota — ignorar ese número.
 7. 🚫 El lag de la interfaz NO se arregla con más RAM: el cuello de botella es el stream de video del VNC. Para eso existe el modo ligero (`modo.sh`).
+8. 🚫 El «destino» del modo ligero es la página de NOTION (notion.so/...), nunca la URL del VNC/noVNC.
 
 ## Pendientes / siguiente trabajo
 

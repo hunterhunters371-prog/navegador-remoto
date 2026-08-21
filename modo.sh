@@ -1,15 +1,15 @@
 #!/bin/sh
 # ============================================================
 #  modo.sh — interruptor de nav1: PANTALLA (VNC) <-> LIGERO (texto)
-#  v1.0 EXPERIMENTAL
-#
-#  LIGERO: Firefox headless (sin pantalla) + Marionette (protocolo
-#  nativo de Firefox, sin descargas) + mini chat web de texto en
-#  la ruta nav1-chat. Misma sesion/login del volumen persistente.
-#  Mucho menos ancho de banda: no hay video, solo texto.
+#  v1.1 EXPERIMENTAL
+#    · el destino se valida: solo URLs de Notion (evita apuntar
+#      el headless a la URL del VNC por error)
+#    · nuevo /debug?clave=... : reporta que esta viendo el
+#      Firefox headless (url, titulo, composer, login)
+#  v1.0: Firefox headless + Marionette + mini chat web de texto
 #
 #  Uso (terminal web de OpenShift, icono >_):
-#    sh modo.sh ligero     → activa el chat de texto
+#    sh modo.sh ligero     → activa/actualiza el chat de texto
 #    sh modo.sh pantalla   → vuelve al escritorio VNC de siempre
 #    sh modo.sh estado     → que esta corriendo ahora
 # ============================================================
@@ -265,7 +265,10 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
     def _ok(self):
-        return self.headers.get("X-Clave") == CLAVE
+        if self.headers.get("X-Clave") == CLAVE:
+            return True
+        q = parse_qs(urlparse(self.path).query)
+        return q.get("clave", [None])[0] == CLAVE
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/salud":
@@ -290,6 +293,20 @@ class H(BaseHTTPRequestHandler):
         if path == "/destino":
             self._json({"destino": destino_actual()})
             return
+        if path == "/debug":
+            with m_lock:
+                try:
+                    info = {
+                        "url_actual": js("location.href"),
+                        "titulo": js("document.title"),
+                        "composer_encontrado": js(JS_COMPOSER),
+                        "parece_pantalla_de_login": js("!!document.body && /log in|sign in|iniciar sesi|continuar con/i.test(document.body.innerText||'')"),
+                    }
+                except Exception as e:
+                    info = {"error": str(e)}
+            info["destino_configurado"] = destino_actual()
+            self._json(info)
+            return
         self._json({"error": "ruta desconocida"}, 404)
     def do_POST(self):
         if not self._ok():
@@ -310,6 +327,9 @@ class H(BaseHTTPRequestHandler):
             self._json({"id": jid})
             return
         if path == "/destino":
+            if cuerpo and "notion" not in cuerpo.lower():
+                self._json({"error": "el destino debe ser una pagina de Notion (notion.so/...)", "destino": destino_actual()}, 400)
+                return
             open(DESTINO_FILE, "w").write(cuerpo + "\n")
             self._json({"destino": cuerpo})
             return
@@ -351,7 +371,7 @@ PYEOF
 </header>
 <header id="cfg">
   <input id="clave" placeholder="clave" type="password">
-  <input id="destino" placeholder="URL destino (tu chat de Notion AI)">
+  <input id="destino" placeholder="URL de tu pagina/chat de Notion (notion.so/...)">
   <button id="bg" type="button">Guardar</button>
 </header>
 <div id="msgs"></div>
@@ -394,7 +414,7 @@ $("bg").onclick = function() {
   localStorage.setItem("nl_clave", clave);
   var d = $("destino").value.trim();
   var p = d ? api("/destino", {method:"POST", body:d}) : Promise.resolve();
-  p.then(function(){ add("estado", "guardado ✓"); });
+  p.then(function(r){ if (r && r.error) { add("estado", "⚠ " + r.error); } else { add("estado", "guardado ✓"); } });
 };
 function enviar() {
   var t = $("t").value.trim();
@@ -478,23 +498,19 @@ INNER
   cat <<FIN
 
 ============================================================
- ✅ MODO LIGERO ACTIVO (experimental)
+ ✅ MODO LIGERO ACTIVO (v1.1 experimental)
 ------------------------------------------------------------
  Abre en tu PC/telefono:  https://$RUTA/
  Clave (te la pide una vez, boton ⚙): $CLAVE
 ------------------------------------------------------------
- · Escribes y recibes respuestas de Notion AI como TEXTO:
-   sin video, casi sin datos, rapido en cualquier aparato.
- · Usa tu MISMO login de Notion (el del volumen).
- · Pagina destino por defecto: https://www.notion.so/chat
-   (cambiala en el boton ⚙ de la mini-web si tu chat
-   de Notion AI vive en otra URL)
- · Una pregunta a la vez. Las respuestas tardan lo que
-   tarde Notion AI; veras "pensando...".
+ · El DESTINO (boton ⚙) debe ser una pagina de NOTION,
+   ej: https://www.notion.so/chat  —  NUNCA la URL del VNC.
+ · Diagnostico (si algo no responde): abre
+   https://$RUTA/debug?clave=$CLAVE
+   y pegale al chat el JSON que aparece.
 ------------------------------------------------------------
  Si algo falla: vuelve a la normalidad con
    sh modo.sh pantalla
- y pegale al chat la salida completa para ajustar.
 ============================================================
 FIN
   ;;
