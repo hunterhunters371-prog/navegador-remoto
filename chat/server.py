@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
-# server.py v1.8 - puente de texto <-> Notion AI (Firefox headless + Marionette)
+# server.py v1.8.1 - puente de texto <-> Notion AI (Firefox headless + Marionette)
 # Solo stdlib. Vive en /headless/data/chat/ dentro del pod; lo instala modo.sh
 #
-# NUEVO en v1.8:
+# NUEVO en v1.8.1 (arreglo del login, con evidencia del pod):
+#   - /entrar fallaba con "no encontre el boton Continuar": la pagina de login
+#     de Notion no usa <button>Continuar</button>. Ahora: Enter REAL dentro del
+#     campo de correo (ElementSendKeys \uE007 = envia el form nativo) y, de
+#     respaldo, clic ampliado (button + [role=button] + submit; NUNCA Google/
+#     Apple/SSO). Si nada funciona, el error LISTA los botones visibles reales.
+#   - JS_LOGIN tambien lee document.title (la pagina de login dice "Iniciar
+#     sesion" solo en el titulo) -> el arranque ya no se cuelga 180 s.
+#   - /entrar y /codigo devuelven "pantalla" (texto visible) para diagnosticar.
+# v1.8:
 #   - /sesion (GET)  -> estado de la sesion de Notion (correo visto, parece_login)
 #   - /entrar (POST correo) -> abre el login de Notion y pide el codigo al correo
 #   - /codigo (POST codigo) -> escribe el codigo recibido y completa la entrada
 #   - /salir  (POST) -> cierra la sesion (notion.so/logout; plan B: cookies +
-#     localStorage) y resetea destino.txt a la portada (el chat guardado era
-#     del workspace VIEJO: con la cuenta nueva ese chat no existe)
-#   - esperar_composer() sale de inmediato si detecta pantalla de login
-#     (antes bloqueaba el puente hasta 180 s y /entrar respondia "ocupado")
+#     localStorage) y resetea destino.txt a la portada
 #   REGLA DE ORO: el login es SOLO correo + codigo. NUNCA "Continuar con
 #   Google" (la IP del datacenter hace que Google bloquee la cuenta).
 # v1.7:
@@ -191,8 +197,8 @@ const eds = [...document.querySelectorAll('div[contenteditable="true"]')]
 return eds.length;
 """
 JS_LOGIN = """
-const t = (document.body && document.body.innerText) || "";
-return /log in|sign in|iniciar sesi|continuar con/i.test(t);
+const t = ((document.body && document.body.innerText) || "") + " " + (document.title || "");
+return /log in|sign in|iniciar sesi|inicia sesi|continuar con|continue with|continua con/i.test(t);
 """
 JS_LEER = """
 const main = document.querySelector("main") || document.body;
@@ -328,18 +334,25 @@ return m ? m[0] : "";
 
 # --- sesion de Notion (correo + codigo; el boton de Google queda PROHIBIDO) ---
 SEL_EMAIL = ('input[autocomplete="email"], input[type="email"], input[name="email"], '
-             'input[placeholder*="correo" i], input[placeholder*="email" i]')
+             'input[placeholder*="correo" i], input[placeholder*="email" i], '
+             'input:not([type=hidden]):not([type=checkbox]):not([type=radio])')
 SEL_CODIGO = ('input[autocomplete="one-time-code"], input[inputmode="numeric"], '
               'input[type="tel"], input[name="code"], '
               'input[placeholder*="codigo" i], input[placeholder*="code" i]')
 JS_CLIC_ENTRAR = VIS + """
-// exacto: "Continuar"/"Continue" a secas — NUNCA "Continuar con Google"
-const bs = [...document.querySelectorAll('button')].filter(vis);
-const b = bs.find(x => /^(continuar|continue|log in|iniciar sesi[o\u00f3]n)$/i
-  .test((x.innerText || "").trim()));
-if (!b) return "no-esta";
+// NUNCA Google/Apple/SSO. Si no encuentra el boton de envio, devuelve
+// la lista real de botones visibles para diagnosticar sin adivinar.
+const PROH = /google|apple|microsoft|saml|sso|facebook/i;
+const OK = /^(continuar|continue|siguiente|next|enviar|send|log in|iniciar sesi[o\u00f3]n|inicia sesi[o\u00f3]n|continuar con correo|continue with email)$/i;
+const bs = [...document.querySelectorAll('button, [role="button"], input[type="submit"]')].filter(vis);
+const lista = bs.map(x => ((x.innerText || x.value || x.getAttribute("aria-label") || "").trim().split("\\n")[0]).slice(0,40)).filter(t => t.length > 0);
+const b = bs.find(x => {
+  const t = ((x.innerText || x.value || x.getAttribute("aria-label") || "").trim().split("\\n")[0]);
+  return OK.test(t) && !PROH.test(t);
+});
+if (!b) return "no-esta: " + JSON.stringify(lista.slice(0, 12));
 b.click();
-return "clic";
+return "clic: " + ((b.innerText || b.value || "").trim().split("\\n")[0]).slice(0, 40);
 """
 
 # ---------------- logica ----------------
@@ -523,6 +536,22 @@ def buscar(selector, seg=15):
             time.sleep(1)
     raise RuntimeError("no aparecio el campo en la pagina (%s)" % selector)
 
+def hay_campo(selector, seg=4):
+    t0 = time.time()
+    while time.time() - t0 < seg:
+        try:
+            cmd("WebDriver:FindElement", {"using": "css selector", "value": selector})
+            return True
+        except Exception:
+            time.sleep(1)
+    return False
+
+def pantalla_corta():
+    try:
+        return (js(JS_TEXTO) or "")[:300]
+    except Exception:
+        return ""
+
 def estado_sesion():
     return {"url": js(JS_URL) or "", "titulo": js(JS_TITULO) or "",
             "correo": js(JS_CORREO) or "", "parece_login": bool(js(JS_LOGIN)),
@@ -538,11 +567,23 @@ def entrar(correo):
     eid = buscar(SEL_EMAIL, 18)
     cmd("WebDriver:ElementSendKeys", {"id": eid, "text": correo})
     time.sleep(1)
-    if js(JS_CLIC_ENTRAR) != "clic":
-        raise RuntimeError("escribi el correo pero no encontre el boton Continuar (NO uses el de Google)")
+    # via 1: Enter real dentro del campo -> envia el formulario nativo
+    try:
+        cmd("WebDriver:ElementSendKeys", {"id": eid, "text": ""})
+    except Exception:
+        pass
     time.sleep(4)
-    return {"correo": correo, "url": js(JS_URL) or "",
-            "aviso": "si Notion acepto el correo, el codigo ya va en camino a %s" % correo}
+    if hay_campo(SEL_CODIGO, 3):
+        return {"correo": correo, "url": js(JS_URL) or "", "via": "enter",
+                "pantalla": pantalla_corta()}
+    # via 2: clic al boton de envio (sin depender de su texto exacto)
+    r = js(JS_CLIC_ENTRAR) or ""
+    time.sleep(4)
+    if hay_campo(SEL_CODIGO, 3) or r.startswith("clic:"):
+        return {"correo": correo, "url": js(JS_URL) or "", "via": r,
+                "pantalla": pantalla_corta()}
+    raise RuntimeError("escribi el correo pero el envio no avanzo. Botones visibles: %s | pantalla: %s"
+                       % (r, pantalla_corta()))
 
 def entrar_codigo(codigo):
     codigo = re.sub(r"\s+", "", codigo or "")
@@ -550,6 +591,11 @@ def entrar_codigo(codigo):
         raise RuntimeError("codigo vacio")
     eid = buscar(SEL_CODIGO, 12)
     cmd("WebDriver:ElementSendKeys", {"id": eid, "text": codigo})
+    time.sleep(1)
+    try:
+        cmd("WebDriver:ElementSendKeys", {"id": eid, "text": ""})
+    except Exception:
+        pass
     time.sleep(3)
     url = js(JS_URL) or ""
     if "login" in url or js(JS_LOGIN):
@@ -557,14 +603,14 @@ def entrar_codigo(codigo):
         time.sleep(4)
         url = js(JS_URL) or ""
     if "login" in url and js(JS_LOGIN):
-        raise RuntimeError("el codigo no fue aceptado (¿mal copiado o expirado?) — pide otro con Enviar codigo")
+        raise RuntimeError("el codigo no fue aceptado (¿mal copiado o expirado?) — pide otro con Enviar codigo. Pantalla: %s" % pantalla_corta())
     pagina["estado"] = "otra-pagina"
     pagina["detalle"] = "sesion iniciada"
     navegar(NOTION)
     time.sleep(3)
     cache["texto"] = ""
     cache["cuando"] = 0
-    return {"url": js(JS_URL) or ""}
+    return {"url": js(JS_URL) or "", "pantalla": pantalla_corta()}
 
 def salir():
     try:
@@ -700,7 +746,7 @@ class H(BaseHTTPRequestHandler):
                 m = "ocupado (trabajando)"
             else:
                 m = "escuchando" if marionette_vivo() else "NO responde"
-            self._json({"ok": True, "version": "1.8", "firefox_headless": ff,
+            self._json({"ok": True, "version": "1.8.1", "firefox_headless": ff,
                         "marionette": m, "destino": destino_actual(),
                         "modelo": modelo_actual(), "archivos": len(lista_subidas()),
                         "pagina": pagina["estado"], "detalle": pagina["detalle"],
@@ -913,4 +959,4 @@ if __name__ == "__main__":
     threading.Thread(target=lector, daemon=True).start()
     ir_al_destino()
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
-# MARCA-FIN-SERVER v1.8
+# MARCA-FIN-SERVER v1.8.1
