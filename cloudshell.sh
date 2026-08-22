@@ -1,6 +1,14 @@
 #!/bin/sh
 # ============================================================
 #  cloudshell.sh — navegador remoto + mini-web en Google Cloud Shell
+#  v2: cura el "error/ocupado" visto en Cloud Shell (22 ago):
+#    - espera el puerto 2828 de Marionette ANTES de lanzar el puente
+#      (perfil nuevo tarda en arrancar; sin la espera, la 1a navegacion
+#      fallaba y quedaba el estado "error")
+#    - mata los navegadores DE FABRICA de la imagen (roban RAM al
+#      headless en la VM chica -> cuelgues = "ocupado")
+#    - vigilante headless: si Firefox muere (OOM), revive solo en ~15 s
+#      (server.py reconecta la sesion solo, ya lo hace)
 #  Equivalente docker de: openshift-nav.sh + modo.sh ligero
 #
 #  Lo que hace:
@@ -115,6 +123,13 @@ user_pref("browser.cache.disk.capacity", 51200);
 user_pref("browser.cache.disk.smart_size.enabled", false);
 PREFS
 
+# la imagen de fabrica puede auto-abrir su propio navegador en el
+# escritorio VNC: en la VM chica de Cloud Shell eso roba la RAM al
+# firefox headless (misma cura que os.sh aplicaba en el pod)
+pkill -f /usr/lib64/firefox 2>/dev/null || true
+pkill -f /usr/bin/chromium 2>/dev/null || true
+pkill -f chromium-browser 2>/dev/null || true
+pkill -f firefox-esr 2>/dev/null || true
 pkill -f "$D/firefox/firefox" 2>/dev/null || true
 pkill -f 'chat/server.py' 2>/dev/null || true
 sleep 2
@@ -124,7 +139,20 @@ if [ ! -s "$D/chat/clave.txt" ]; then
 fi
 
 MOZ_HEADLESS=1 nohup "$D/firefox/firefox" --headless --marionette --profile "$D/ff-notion" >/dev/null 2>&1 &
-sleep 1
+
+echo "==> esperando a que Marionette abra el puerto 2828 (perfil nuevo tarda)..."
+i=0
+while [ $i -lt 45 ]; do
+  if python3 -c "import socket; s=socket.create_connection(('127.0.0.1',2828),2); s.close()" 2>/dev/null; then
+    echo "   [OK] marionette escuchando en 2828"
+    break
+  fi
+  i=$((i+1)); sleep 2
+done
+
+# vigilante headless: si Firefox muere (OOM), se reabre solo en ~15 s
+nohup sh -c 'D=/headless/data; while true; do if ! pgrep -f "firefo[x]/firefox" >/dev/null 2>&1; then MOZ_HEADLESS=1 "$D/firefox/firefox" --headless --marionette --profile "$D/ff-notion" >/dev/null 2>&1 & fi; sleep 15; done' >/dev/null 2>&1 &
+
 nohup python3 "$D/chat/server.py" >/dev/null 2>&1 &
 sleep 3
 
@@ -154,7 +182,7 @@ CLAVE=$(docker exec -i "$NAME" cat /headless/data/chat/clave.txt | tr -d '\r')
 cat <<FIN
 
 ============================================================
- ✅ NAVEGADOR + MINI-WEB LISTOS EN CLOUD SHELL
+ ✅ NAVEGADOR + MINI-WEB LISTOS EN CLOUD SHELL (v2)
 ------------------------------------------------------------
  1. Mini-web:  boton "Vista previa en la web" (icono de ojo/
     ventana arriba a la derecha) -> Vista previa en el puerto
