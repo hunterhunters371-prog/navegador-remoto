@@ -316,6 +316,7 @@ $("bcfg").onclick = function() {
   for (var i = 0; i < PANT.length; i++)
     h += '<button data-ir="' + PANT[i][1] + '">' + PANT[i][0] + '</button>';
   h += '</div><div class="fila"><button data-a="ctrl">Ver botones de la pantalla</button>' +
+       '<button data-a="creditos">💳 Creditos del plan</button>' +
        '<button data-a="volver">Volver al chat de IA</button></div><div id="vista"></div>' +
        '<div class="fila"><button data-a="chat">Cerrar ajustes</button></div>';
   verPanel(h);
@@ -392,6 +393,15 @@ panel.addEventListener("click", function(ev) {
         : "✓ Sesion cerrada. Escribe el correo de la cuenta nueva y pulsa 1.");
       if ($("destino")) $("destino").value = NOTION;
     }).catch(function(){ verSesion("⚠ tardo demasiado — cierra y vuelve a abrir ⚙ para verificar"); });
+  } else if (a === "creditos") {
+    $("vista").innerHTML = '<p class="sub">leyendo tu asignacion de creditos (unos segundos)...</p>';
+    api("/creditos").then(function(d) {
+      if (d.error || d.ocupado) { $("vista").innerHTML = '<p class="sub">⚠ ' + esc(d.error || "ocupado") + '</p>'; return; }
+      var h = '';
+      if (d.menu) h += '<p class="sub">No encontre la entrada de creditos. Esto hay en ajustes — dime cual es y lo agrego:</p><pre class="mini">' + esc((d.menu || []).join("\n")) + '</pre>';
+      h += '<pre class="mini">' + esc(d.texto || "(vacio)") + '</pre>';
+      $("vista").innerHTML = h;
+    }).catch(function(){ $("vista").innerHTML = '<p class="sub">⚠ tardo demasiado — reintenta</p>'; });
   } else if (a === "chat") { verChat(); }
   else if (a === "ctrl") { verControles(); }
   else if (a === "diag") { diagnostico($("vista")); }
@@ -493,4 +503,4 @@ if (!clave) $("bcfg").click();
 </script>
 </body>
 </html>
-<!-- MARCA-FIN-HTML v2.0 -->
+<!-- MARCA-FIN-HTML v2.1 -->
