@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-# server.py v1.8.1 - puente de texto <-> Notion AI (Firefox headless + Marionette)
+# server.py v1.8.2 - puente de texto <-> Notion AI (Firefox headless + Marionette)
 # Solo stdlib. Vive en /headless/data/chat/ dentro del pod; lo instala modo.sh
 #
-# NUEVO en v1.8.1 (arreglo del login, con evidencia del pod):
+# NUEVO en v1.8.2 (con evidencia del pod, cuenta nueva):
+#   - El selector de modelo existia pero mi lista no conocia "Kimi K3" ->
+#     JS_ABRIR_MODELO ahora reconoce kimi/qwen/glm/minimax ademas de los de antes.
+#   - JS_LOGIN daba falso positivo en chats cuyo TEXTO habla de "iniciar sesion":
+#     ahora, si hay un composer visible (contenteditable), NO es login. Punto.
+#   - lector() con ritmo adaptativo: 5 s mientras la pagina carga, 15 s cuando
+#     ya esta lista (leer 67 mil caracteres cada 5 s quemaba CPU del pod gratis).
+# v1.8.1 (arreglo del login, con evidencia del pod):
 #   - /entrar fallaba con "no encontre el boton Continuar": la pagina de login
 #     de Notion no usa <button>Continuar</button>. Ahora: Enter REAL dentro del
 #     campo de correo (ElementSendKeys \uE007 = envia el form nativo) y, de
@@ -197,6 +204,11 @@ const eds = [...document.querySelectorAll('div[contenteditable="true"]')]
 return eds.length;
 """
 JS_LOGIN = """
+// un chat con composer visible NUNCA es la pantalla de login (v1.8.2:
+// el texto de un chat puede hablar de "iniciar sesion" y engañar al regex)
+const hayComposer = [...document.querySelectorAll('div[contenteditable="true"]')]
+  .some(e => e.offsetParent !== null);
+if (hayComposer) return false;
 const t = ((document.body && document.body.innerText) || "") + " " + (document.title || "");
 return /log in|sign in|iniciar sesi|inicia sesi|continuar con|continue with|continua con/i.test(t);
 """
@@ -230,7 +242,7 @@ function zona(){
 }
 """
 JS_ABRIR_MODELO = JS_ZONA + """
-const re = /gpt|claude|sonnet|opus|haiku|gemini|llama|mistral|deepseek|grok|auto|r[a\u00e1]pid|fast|advanc|avanzad|thinking|razona|model/i;
+const re = /gpt|claude|sonnet|opus|haiku|gemini|llama|mistral|deepseek|grok|kimi|qwen|glm|minimax|auto|r[a\u00e1]pid|fast|advanc|avanzad|thinking|razona|model/i;
 function cand(raiz){
   return [...raiz.querySelectorAll('button, div[role="button"]')].filter(vis)
     .filter(b => re.test((b.innerText || "") + " " + (b.getAttribute("aria-label") || "")));
@@ -689,9 +701,10 @@ def trabajar(job_id, texto):
             jobs[job_id] = {"listo": True, "texto": "", "error": str(e)}
 
 def lector():
-    # lee la pagina en 2do plano y cachea: el espejo nunca bloquea
+    # lee la pagina en 2do plano y cachea: el espejo nunca bloquea.
+    # ritmo adaptativo (v1.8.2): rapido durante la carga, calmado al estar lista
     while True:
-        time.sleep(5)
+        time.sleep(5 if pagina["estado"] in ("iniciando", "cargando", "navegando") else 15)
         if not m_lock.acquire(blocking=False):
             continue
         try:
@@ -746,7 +759,7 @@ class H(BaseHTTPRequestHandler):
                 m = "ocupado (trabajando)"
             else:
                 m = "escuchando" if marionette_vivo() else "NO responde"
-            self._json({"ok": True, "version": "1.8.1", "firefox_headless": ff,
+            self._json({"ok": True, "version": "1.8.2", "firefox_headless": ff,
                         "marionette": m, "destino": destino_actual(),
                         "modelo": modelo_actual(), "archivos": len(lista_subidas()),
                         "pagina": pagina["estado"], "detalle": pagina["detalle"],
@@ -959,4 +972,4 @@ if __name__ == "__main__":
     threading.Thread(target=lector, daemon=True).start()
     ir_al_destino()
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
-# MARCA-FIN-SERVER v1.8.1
+# MARCA-FIN-SERVER v1.8.2
