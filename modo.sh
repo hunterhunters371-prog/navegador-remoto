@@ -1,19 +1,31 @@
 #!/bin/sh
 # ============================================================
 #  modo.sh — interruptor de nav1: PANTALLA (VNC) <-> LIGERO (texto)
-#  v1.8
+#  v1.9
 #    Este script ya NO lleva el codigo dentro: descarga
 #    chat/server.py y chat/chat.html del repo y los mete en el
 #    pod. Asi ningun archivo se corta al publicarlo.
 #
-#    Nuevo en esta version (server v1.8 + mini-web v1.9):
+#    Nuevo en esta version (server v1.9 + mini-web v2.0):
+#      💬 Chats      — historial de tus chats de IA, cambiar de
+#                      chat y crear uno NUEVO desde la mini-web.
+#                      Lee el panel lateral ya cargado: cero
+#                      navegaciones extra, cero costo de RAM.
+#                      Tip: un chat vacio pesa mucho menos.
+#      ⬇ Descargas  — baja archivos del pod a tu aparato desde 📎
+#                      (sin los servicios externos que el firewall
+#                      del sandbox bloqueaba).
+#      👤 La cabecera muestra el nombre de tu workspace.
+#
+#    Nuevo en v1.8.x (server v1.8-1.8.2 + mini-web v1.9):
 #      🔑 Sesion     — entrar/salir de la cuenta de Notion DESDE
 #                      la mini-web (⚙ → Sesion): correo + codigo,
 #                      sin tener que volver al modo pantalla.
 #                      NUNCA usar "Continuar con Google".
+#      🤖 Elegir IA  — ahora reconoce Kimi/Qwen/GLM/MiniMax
+#      ⚡ lector con ritmo adaptativo (menos CPU de fondo)
 #
 #    Novedades anteriores (v1.7):
-#      🤖 Elegir IA  — lee el selector de modelo de Notion
 #      📎 Archivos   — subir desde el movil y adjuntar al chat
 #      ⚙ Cuenta     — Cuenta/Notificaciones/Conexiones/Espacio
 #                      de Notion en texto, con botones pulsables
@@ -80,7 +92,7 @@ SVC
     fi
     rm -f "$_f"
   }
-  log "Descargando el puente v1.8 del repo..."
+  log "Descargando el puente v1.9 del repo..."
   bajar chat/server.py /headless/data/chat/server.py MARCA-FIN-SERVER
   bajar chat/chat.html /headless/data/chat/chat.html MARCA-FIN-HTML
   oc exec -i "$POD" -- sh -c '[ -s /headless/data/chat/server.py ]' || {
@@ -129,20 +141,23 @@ INNER
   cat <<FIN
 
 ============================================================
- ✅ MODO LIGERO ACTIVO (v1.8)
+ ✅ MODO LIGERO ACTIVO (v1.9)
 ------------------------------------------------------------
  Abre en tu PC/telefono:  https://$RUTA/
  Clave (boton ⚙, se guarda sola): $CLAVE
 ------------------------------------------------------------
  BOTONES arriba en la mini-web:
+   💬  Chats      — NUEVO: historial de tus chats de IA, toca
+       uno para cambiar al instante, o "+ Nuevo chat". Un chat
+       vacio pesa mucho menos: mejora la velocidad gratis
    🤖  Elegir IA  — abre el selector de modelo de Notion y
-       lista las opciones reales (GPT, Claude, etc.)
+       lista las opciones reales (GPT, Claude, Kimi, etc.)
    📎  Archivos   — sube desde el movil (max 20 MB) y lo
-       adjunta al chat; luego escribes y envias
-   ⚙   Ajustes    — clave/destino + 🔑 SESION NUEVO: entrar o
-       cerrar la sesion de Notion con correo+codigo, sin salir
-       del modo ligero. Mas abajo: Cuenta, Notificaciones,
-       Conexiones y Espacio en texto, con botones pulsables
+       adjunta al chat; y ahora tambien DESCARGA archivos
+       del pod a tu aparato (lista "En el pod")
+   ⚙   Ajustes    — clave/destino + 🔑 Sesion: entrar o cerrar
+       la sesion de Notion con correo+codigo (NUNCA Google).
+       Mas abajo: Cuenta, Notificaciones, Conexiones y Espacio
    🪞  Espejo     — la pagina en texto, en vivo
 ------------------------------------------------------------
  Espera a ver "✓ pagina lista" arriba antes de escribir.
