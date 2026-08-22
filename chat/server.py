@@ -1,1 +1,1 @@
-<FULL_V19_SERVER>
+placeholder-server
